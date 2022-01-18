@@ -10,7 +10,7 @@ use thread_local::ThreadLocal;
 
 pub struct Crystalline<const SLOTS: usize> {
     epoch: AtomicU64,
-    slot: ThreadLocal<Slot<SLOTS>>,
+    slots: ThreadLocal<Slots<SLOTS>>,
     batches: ThreadLocal<UnsafeCell<Batch>>,
     allocs: ThreadLocal<AtomicU64>,
 }
@@ -45,17 +45,17 @@ unsafe impl Send for Batch {}
 unsafe impl Sync for Batch {}
 
 #[repr(C)]
-struct Slot<const SLOTS: usize> {
+struct Slots<const SLOTS: usize> {
     first: [AtomicPtr<Node>; SLOTS],
     epoch: [AtomicU64; SLOTS],
 }
 
-impl<const SLOTS: usize> Default for Slot<SLOTS> {
+impl<const SLOTS: usize> Default for Slots<SLOTS> {
     fn default() -> Self {
         const ZERO: AtomicU64 = AtomicU64::new(0);
         const INACTIVE: AtomicPtr<Node> = AtomicPtr::new(Node::INACTIVE);
 
-        Slot {
+        Slots {
             first: [INACTIVE; SLOTS],
             epoch: [ZERO; SLOTS],
         }
@@ -76,7 +76,7 @@ impl Node {
 
 union ReservationNode {
     next: ManuallyDrop<AtomicPtr<Node>>,
-    slot: *const AtomicPtr<Node>,
+    slot: usize,
 }
 
 union BatchNode {
@@ -88,7 +88,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub fn new(threads: usize) -> Self {
         Self {
             epoch: AtomicU64::new(1),
-            slot: ThreadLocal::with_capacity(threads),
+            slots: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             allocs: ThreadLocal::with_capacity(threads),
         }
@@ -173,7 +173,6 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             loop {
                 let node = start;
                 start = (*node).batch.next;
-                println!("DEALLOC");
                 ((*node).drop)(node);
 
                 if start.is_null() {
@@ -190,7 +189,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
         let mut last = curr;
 
-        for slot in self.slot.iter() {
+        for slot in self.slots.iter() {
             for i in 0..SLOTS {
                 let first = slot.first[i].load(Ordering::Acquire);
                 if first == Node::INACTIVE {
@@ -206,7 +205,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
                     return;
                 }
 
-                (*last).reservation.slot = &slot.first[i];
+                (*last).reservation.slot = i;
                 last = (*last).batch.next;
             }
         }
@@ -214,23 +213,27 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         let mut adjs = 0;
 
         'walk: while curr != last {
-            let slot_first = (*curr).reservation.slot;
-            let slot_epoch = slot_first.add(SLOTS) as *const AtomicU64;
-            let prev = (*slot_first).load(Ordering::Acquire);
+            let slot = self.slots.get().unwrap();
+
+            let i = (*curr).reservation.slot;
+            let slot_first = slot.first.get_unchecked(i);
+            let slot_epoch = slot.epoch.get_unchecked(i);
+
+            let prev = slot_first.load(Ordering::Acquire);
 
             loop {
                 if prev == Node::INACTIVE {
                     continue 'walk;
                 }
 
-                let epoch = (*slot_epoch).load(Ordering::Acquire);
+                let epoch = slot_epoch.load(Ordering::Acquire);
                 if epoch < min_epoch {
                     continue 'walk;
                 }
 
                 (*curr).reservation.next.store(prev, Ordering::Relaxed);
 
-                if (*slot_first)
+                if slot_first
                     .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire)
                     .is_err()
                 {
@@ -256,9 +259,9 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
     unsafe fn retire<T>(&self, shared: Shared<'_, T>) {
         debug_assert!(!shared.ptr.is_null(), "Attempted to retire null pointer");
-
-        let node = &mut (*shared.ptr).node; // TODO: sketchy
         let batch = &mut *self.batches.get_or_default().get();
+        let node = ptr::addr_of_mut!((*shared.ptr).node);
+
         if batch.first.is_null() {
             batch.min_epoch = (*node).birth_epoch;
             batch.last = node;
@@ -267,10 +270,10 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
                 batch.min_epoch = (*node).birth_epoch;
             }
 
-            node.batch_link = batch.last;
+            (*node).batch_link = batch.last;
         }
 
-        node.batch.next = batch.first;
+        (*node).batch.next = batch.first;
         batch.first = node;
         batch.counter += 1;
 
@@ -280,7 +283,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         }
     }
 
-    fn update_epoch(&self, slot: &Slot<SLOTS>, mut current_epoch: u64, index: usize) -> u64 {
+    fn update_epoch(&self, slot: &Slots<SLOTS>, mut current_epoch: u64, index: usize) -> u64 {
         if !slot.first[index].load(Ordering::Acquire).is_null() {
             let first = slot.first[index].swap(Node::INACTIVE, Ordering::AcqRel);
             if first != Node::INACTIVE {
@@ -332,7 +335,7 @@ impl<T> Atomic<T> {
         guard: &'a mut LocalGuard<'_, SLOTS>,
     ) -> Shared<'a, T> {
         let crystalline = &guard.guard.crystalline;
-        let slot = crystalline.slot.get_or_default();
+        let slot = crystalline.slots.get_or_default();
 
         let mut prev_epoch = slot.epoch[guard.index].load(Ordering::Acquire);
 
@@ -378,7 +381,7 @@ impl<const SLOTS: usize> Drop for Guard<'_, SLOTS> {
         let mut first: [*mut Node; SLOTS] = [ptr::null_mut(); SLOTS];
 
         for i in 0..SLOTS {
-            first[i] = self.crystalline.slot.get_or_default().first[i]
+            first[i] = self.crystalline.slots.get_or_default().first[i]
                 .swap(Node::INACTIVE, Ordering::AcqRel);
         }
 
@@ -410,7 +413,7 @@ fn it_works() {
     }
 
     let crystalline = Crystalline::<3>::new(16);
-    for i in 0..1000 {
+    for i in 0..120 {
         let pointer = crystalline.alloc(Foo(i));
 
         let guard = crystalline.guard();
