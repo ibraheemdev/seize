@@ -13,11 +13,15 @@ pub struct Crystalline<const SLOTS: usize> {
 }
 
 const EPOCH_TICK: u64 = 110;
-const RETIRE_TICK: usize = 30;
+const RETIRE_TICK: usize = 1;
 const MAX_NODES: usize = 12;
 
 impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub fn with_threads(threads: usize) -> Self {
+        if SLOTS > u8::MAX as _ {
+            panic!("slots cannot be greater than {}", u8::MAX);
+        }
+
         Self {
             epoch: AtomicU64::new(1),
             slots: ThreadLocal::with_capacity(threads),
@@ -26,7 +30,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         }
     }
 
-    pub fn alloc<T>(&self, value: T) -> *mut Linked<T> {
+    pub fn alloc<T>(&self, value: T) -> Box<Linked<T>> {
         let count = self.allocs.get_or_default().fetch_add(1, Ordering::Relaxed);
 
         if (count + 1) % EPOCH_TICK == 0 {
@@ -52,16 +56,16 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             },
         };
 
-        Box::into_raw(Box::new(data))
+        Box::new(data)
     }
 
-    pub fn load<T>(&self, ptr: &AtomicPtr<T>, index: usize) -> *mut T {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering, index: usize) -> *mut T {
         let slot = self.slots.get_or_default();
 
         let mut prev_epoch = slot.epoch[index].load(Ordering::Acquire);
 
         loop {
-            let ptr = ptr.load(Ordering::Acquire);
+            let ptr = ptr.load(ordering);
             let current_epoch = self.epoch();
 
             if prev_epoch == current_epoch {
@@ -133,7 +137,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             next = (*curr).reservation.next.load(Ordering::Acquire);
             let node = &mut *(*curr).batch_link;
             if node.batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                node.reservation.next.store(batch.nodes, Ordering::SeqCst);
+                node.reservation.next.store(batch.nodes, Ordering::Release);
                 batch.nodes = node;
             }
         }
@@ -154,7 +158,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     unsafe fn free_batch(mut nodes: *mut Node) {
         while !nodes.is_null() {
             let mut start = (*nodes).batch_link;
-            nodes = (*nodes).reservation.next.load(Ordering::SeqCst);
+            nodes = (*nodes).reservation.next.load(Ordering::Acquire);
 
             loop {
                 let node = start;
@@ -191,7 +195,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
                     return;
                 }
 
-                (*last).reservation.slot = i;
+                (*last).reservation.slot = slot.first.as_ptr().add(i);
                 last = (*last).batch.next;
             }
         }
@@ -199,11 +203,8 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         let mut adjs = 0;
 
         'walk: while curr != last {
-            let slot = self.slots.get().unwrap();
-
-            let i = (*curr).reservation.slot;
-            let slot_first = slot.first.get_unchecked(i);
-            let slot_epoch = slot.epoch.get_unchecked(i);
+            let slot_first = &*(*curr).reservation.slot;
+            let slot_epoch = &*(*curr).reservation.slot.add(SLOTS).cast::<AtomicU64>();
 
             let prev = slot_first.load(Ordering::Acquire);
 
@@ -221,7 +222,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
                 if slot_first
                     .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
+                    .is_ok()
                 {
                     break;
                 }
@@ -319,7 +320,7 @@ impl Node {
 
 union ReservationNode {
     next: ManuallyDrop<AtomicPtr<Node>>,
-    slot: usize,
+    slot: *const AtomicPtr<Node>,
 }
 
 union BatchNode {
