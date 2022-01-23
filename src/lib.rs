@@ -1,4 +1,5 @@
 mod raw;
+mod tls;
 mod utils;
 
 use std::marker::PhantomData;

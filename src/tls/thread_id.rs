@@ -5,7 +5,6 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use crate::POINTER_WIDTH;
 use once_cell::sync::Lazy;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -19,6 +18,7 @@ struct ThreadIdManager {
     free_from: usize,
     free_list: BinaryHeap<Reverse<usize>>,
 }
+
 impl ThreadIdManager {
     fn new() -> ThreadIdManager {
         ThreadIdManager {
@@ -26,6 +26,7 @@ impl ThreadIdManager {
             free_list: BinaryHeap::new(),
         }
     }
+
     fn alloc(&mut self) -> usize {
         if let Some(id) = self.free_list.pop() {
             id.0
@@ -38,10 +39,12 @@ impl ThreadIdManager {
             id
         }
     }
+
     fn free(&mut self, id: usize) {
         self.free_list.push(Reverse(id));
     }
 }
+
 static THREAD_ID_MANAGER: Lazy<Mutex<ThreadIdManager>> =
     Lazy::new(|| Mutex::new(ThreadIdManager::new()));
 
@@ -49,18 +52,15 @@ static THREAD_ID_MANAGER: Lazy<Mutex<ThreadIdManager>> =
 /// A thread ID may be reused after a thread exits.
 #[derive(Clone, Copy)]
 pub(crate) struct Thread {
-    /// The thread ID obtained from the thread ID manager.
     pub(crate) id: usize,
-    /// The bucket this thread's local storage will be in.
     pub(crate) bucket: usize,
-    /// The size of the bucket this thread's local storage will be in.
     pub(crate) bucket_size: usize,
-    /// The index into the bucket this thread's local storage is in.
     pub(crate) index: usize,
 }
+
 impl Thread {
     fn new(id: usize) -> Thread {
-        let bucket = usize::from(POINTER_WIDTH) - id.leading_zeros() as usize;
+        let bucket = usize::from(usize::BITS as usize) - id.leading_zeros() as usize;
         let bucket_size = 1 << bucket.saturating_sub(1);
         let index = if id != 0 { id ^ bucket_size } else { 0 };
 
@@ -75,6 +75,7 @@ impl Thread {
 
 /// Wrapper around `Thread` that allocates and deallocates the ID.
 struct ThreadHolder(Thread);
+
 impl ThreadHolder {
     fn new() -> ThreadHolder {
         ThreadHolder(Thread::new(THREAD_ID_MANAGER.lock().unwrap().alloc()))

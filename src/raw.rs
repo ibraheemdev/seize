@@ -1,3 +1,4 @@
+use crate::tls::ThreadLocal;
 use crate::utils::{self, CachePadded, U64Padded};
 use crate::{Link, Linked};
 
@@ -5,8 +6,6 @@ use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-
-use thread_local::ThreadLocal;
 
 pub struct Crystalline<const SLOTS: usize> {
     epoch: AtomicU64,
@@ -34,7 +33,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 
     pub fn node_for<T>(&self) -> Node {
-        let n = self.links.get_or_default().get();
+        let n = self.links.get_or(Default::default).get();
 
         unsafe {
             *n += 1;
@@ -61,7 +60,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         mut op: impl FnMut() -> *mut Linked<T>,
         index: usize,
     ) -> *mut Linked<T> {
-        let slot = self.slots.get_or_default();
+        let slot = self.slots.get_or(Default::default);
 
         let mut prev_epoch = slot.epoch[index].load(Ordering::Acquire);
 
@@ -80,7 +79,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "Attempted to retire null pointer");
 
-        let batch = &mut *self.batches.get_or_default().get();
+        let batch = &mut *self.batches.get_or(Default::default).get();
         let node = ptr::addr_of_mut!((*ptr).node);
 
         (*node).retire = retire;
@@ -107,12 +106,13 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 
     pub unsafe fn clear_all(&self) {
-        let batch = &mut *self.batches.get_or_default().get();
+        let batch = &mut *self.batches.get_or(Default::default).get();
 
         let mut first: [*mut Node; SLOTS] = [ptr::null_mut(); SLOTS];
 
         for i in 0..SLOTS {
-            first[i] = self.slots.get_or_default().first[i].swap(Node::INACTIVE, Ordering::AcqRel);
+            first[i] =
+                self.slots.get_or(Default::default).first[i].swap(Node::INACTIVE, Ordering::AcqRel);
         }
 
         for i in 0..SLOTS {
@@ -254,7 +254,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             let first = slot.first[index].swap(Node::INACTIVE, Ordering::AcqRel);
             if first != Node::INACTIVE {
                 unsafe {
-                    let batch = self.batches.get_or_default().get();
+                    let batch = self.batches.get_or(Default::default).get();
                     Crystalline::<SLOTS>::traverse_cache(&mut *batch, first)
                 }
             }
