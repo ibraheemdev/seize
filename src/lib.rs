@@ -8,10 +8,25 @@ pub struct Crystalline<const SLOTS: usize> {
 }
 
 impl<const SLOTS: usize> Crystalline<SLOTS> {
+    const DEFAULT_EPOCH_TICK: u64 = 110;
+    const DEFAULT_RETIRE_TICK: usize = 120;
+
     pub fn new() -> Self {
         Self {
-            raw: raw::Crystalline::with_threads(1),
+            raw: raw::Crystalline::with_threads(
+                1,
+                Self::DEFAULT_EPOCH_TICK,
+                Self::DEFAULT_RETIRE_TICK,
+            ),
         }
+    }
+
+    pub fn epoch_tick(&mut self, n: u64) {
+        self.raw.epoch_tick = n;
+    }
+
+    pub fn retire_tick(&mut self, n: usize) {
+        self.raw.retire_tick = n;
     }
 
     pub fn guard(&self) -> Guard<'_, SLOTS> {

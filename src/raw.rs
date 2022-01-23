@@ -13,14 +13,16 @@ pub struct Crystalline<const SLOTS: usize> {
     slots: ThreadLocal<CachePadded<Slots<SLOTS>>>,
     batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
     links: ThreadLocal<AtomicU64>,
+    pub(crate) epoch_tick: u64,
+    pub(crate) retire_tick: usize,
 }
 
-const EPOCH_TICK: u64 = 110;
-const RETIRE_TICK: usize = 1;
-const MAX_NODES: usize = 12;
+// The number of nodes we store in a batch before
+// freeing.
+const BATCH_SIZE: usize = 12;
 
 impl<const SLOTS: usize> Crystalline<SLOTS> {
-    pub fn with_threads(threads: usize) -> Self {
+    pub fn with_threads(threads: usize, epoch_tick: u64, retire_tick: usize) -> Self {
         if SLOTS > u8::MAX as _ {
             panic!("slots cannot be greater than {}", u8::MAX);
         }
@@ -30,13 +32,15 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             slots: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             links: ThreadLocal::with_capacity(threads),
+            epoch_tick,
+            retire_tick,
         }
     }
 
     pub fn node_for<T>(&self) -> Node {
-        let count = self.links.get_or_default().fetch_add(1, Ordering::Relaxed);
+        let n = self.links.get_or_default().fetch_add(1, Ordering::Relaxed);
 
-        if (count + 1) % EPOCH_TICK == 0 {
+        if (n + 1) % self.epoch_tick == 0 {
             self.epoch.fetch_add(1, Ordering::AcqRel);
         }
 
@@ -97,7 +101,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         batch.first = node;
         batch.counter += 1;
 
-        if batch.counter % RETIRE_TICK == 0 {
+        if batch.counter % self.retire_tick == 0 {
             (*batch.last).batch_link = node;
             self.try_retire(batch);
         }
@@ -145,7 +149,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
     unsafe fn traverse_cache(batch: &mut Batch, next: *mut Node) {
         if !next.is_null() {
-            if batch.node_count == MAX_NODES {
+            if batch.node_count == BATCH_SIZE {
                 Crystalline::<SLOTS>::free_batch(batch.nodes);
                 batch.nodes = ptr::null_mut();
                 batch.node_count = 0;

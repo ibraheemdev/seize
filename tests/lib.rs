@@ -27,34 +27,32 @@ fn it_works() {
         println!("{}", unsafe { value.deref().0 });
     }
 
-    {
-        let barrier = Arc::new(Barrier::new(2));
-        let foo = Arc::new(AtomicPtr::new(crystalline.link_boxed(Foo(99))));
+    let barrier = Arc::new(Barrier::new(2));
+    let foo = Arc::new(AtomicPtr::new(crystalline.link_boxed(Foo(99))));
 
-        let h = std::thread::spawn({
-            let foo = foo.clone();
-            let barrier = barrier.clone();
-            let crystalline = crystalline.clone();
+    let h = std::thread::spawn({
+        let foo = foo.clone();
+        let barrier = barrier.clone();
+        let crystalline = crystalline.clone();
 
-            move || {
-                let guard = crystalline.guard();
-                let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_TWO);
-                println!("{}", unsafe { value.deref().0 });
+        move || {
+            let guard = crystalline.guard();
+            let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_TWO);
+            println!("{}", unsafe { value.deref().0 });
 
-                barrier.wait();
-                drop(guard);
-                barrier.wait();
-            }
-        });
+            barrier.wait();
+            drop(guard);
+            barrier.wait();
+        }
+    });
 
-        barrier.wait(); // wait for thread to access value
+    barrier.wait(); // wait for thread to access value
 
-        let guard = crystalline.guard();
-        let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_TWO);
-        println!("{}", unsafe { value.deref().0 });
-        unsafe { guard.retire(value.as_ptr(), retire_boxed::<Foo>) }
+    let guard = crystalline.guard();
+    let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_TWO);
+    println!("{}", unsafe { value.deref().0 });
+    unsafe { guard.retire(value.as_ptr(), retire_boxed::<Foo>) }
 
-        barrier.wait(); // wait for thread to drop guard
-        h.join().unwrap();
-    }
+    barrier.wait(); // wait for thread to drop guard
+    h.join().unwrap();
 }
