@@ -21,12 +21,14 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         }
     }
 
-    pub fn epoch_tick(&mut self, n: u64) {
+    pub fn epoch_tick(mut self, n: u64) -> Self {
         self.raw.epoch_tick = n;
+        self
     }
 
-    pub fn retire_tick(&mut self, n: usize) {
+    pub fn retire_tick(mut self, n: usize) -> Self {
         self.raw.retire_tick = n;
+        self
     }
 
     pub fn guard(&self) -> Guard<'_, SLOTS> {
@@ -53,9 +55,17 @@ pub struct Shared<'g, T> {
     guard: PhantomData<&'g T>,
 }
 
-impl<T> Shared<'_, T> {
+impl<'g, T> Shared<'g, T> {
     pub fn as_ptr(&self) -> *mut Linked<T> {
         self.ptr
+    }
+
+    pub unsafe fn deref(&self) -> &'g T {
+        &(*self.ptr).value
+    }
+
+    pub unsafe fn deref_mut(&self) -> &'g mut T {
+        &mut (*self.ptr).value
     }
 }
 
@@ -69,12 +79,6 @@ impl<T> Clone for Shared<'_, T> {
 }
 
 impl<T> Copy for Shared<'_, T> {}
-
-impl<'g, T> Shared<'g, T> {
-    pub unsafe fn deref(&self) -> &'g T {
-        &(*self.ptr).value
-    }
-}
 
 pub struct Protect(pub usize);
 
@@ -122,10 +126,14 @@ pub struct Linked<T> {
     pub value: T,
 }
 
-pub unsafe fn retire_boxed<T>(mut link: Link) {
-    let _ = Box::from_raw(link.as_ptr::<T>());
-}
+pub mod retire {
+    use crate::Link;
 
-pub unsafe fn retire_in_place<T>(mut link: Link) {
-    let _ = std::ptr::drop_in_place(link.as_ptr::<T>());
+    pub unsafe fn boxed<T>(mut link: Link) {
+        let _ = Box::from_raw(link.as_ptr::<T>());
+    }
+
+    pub unsafe fn in_place<T>(mut link: Link) {
+        let _ = std::ptr::drop_in_place(link.as_ptr::<T>());
+    }
 }
