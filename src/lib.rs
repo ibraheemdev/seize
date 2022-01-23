@@ -14,19 +14,19 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub fn new() -> Self {
         Self {
             raw: raw::Crystalline::with_threads(
-                1,
+                num_cpus::get(),
                 Self::DEFAULT_EPOCH_TICK,
                 Self::DEFAULT_RETIRE_TICK,
             ),
         }
     }
 
-    pub fn epoch_tick(mut self, n: u64) -> Self {
+    pub fn epoch_frequency(mut self, n: u64) -> Self {
         self.raw.epoch_tick = n;
         self
     }
 
-    pub fn retire_tick(mut self, n: usize) -> Self {
+    pub fn retire_frequency(mut self, n: usize) -> Self {
         self.raw.retire_tick = n;
         self
     }
@@ -50,36 +50,6 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 }
 
-pub struct Shared<'g, T> {
-    ptr: *mut Linked<T>,
-    guard: PhantomData<&'g T>,
-}
-
-impl<'g, T> Shared<'g, T> {
-    pub fn as_ptr(&self) -> *mut Linked<T> {
-        self.ptr
-    }
-
-    pub unsafe fn deref(&self) -> &'g T {
-        &(*self.ptr).value
-    }
-
-    pub unsafe fn deref_mut(&self) -> &'g mut T {
-        &mut (*self.ptr).value
-    }
-}
-
-impl<T> Clone for Shared<'_, T> {
-    fn clone(&self) -> Self {
-        Shared {
-            ptr: self.ptr,
-            guard: PhantomData,
-        }
-    }
-}
-
-impl<T> Copy for Shared<'_, T> {}
-
 pub struct Protect(pub usize);
 
 pub struct Guard<'a, const SLOTS: usize> {
@@ -96,11 +66,8 @@ impl<'g, const SLOTS: usize> Guard<'g, SLOTS> {
         &self,
         op: impl FnMut() -> *mut Linked<T>,
         protect: Protect,
-    ) -> Shared<'g, T> {
-        Shared {
-            ptr: self.crystalline.raw.protect(op, protect.0),
-            guard: PhantomData,
-        }
+    ) -> *mut Linked<T> {
+        self.crystalline.raw.protect(op, protect.0)
     }
 }
 
@@ -123,7 +90,31 @@ impl Link {
 #[repr(C)]
 pub struct Linked<T> {
     node: raw::Node,
-    pub value: T,
+    value: T,
+}
+
+impl<T> Linked<T> {
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn value_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T> std::ops::Deref for Linked<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Linked<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
 }
 
 pub mod retire {
