@@ -12,7 +12,7 @@ pub struct Crystalline<const SLOTS: usize> {
     epoch: AtomicU64,
     slots: ThreadLocal<CachePadded<Slots<SLOTS>>>,
     batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
-    links: ThreadLocal<AtomicU64>,
+    links: ThreadLocal<UnsafeCell<u64>>,
     pub(crate) epoch_tick: u64,
     pub(crate) retire_tick: usize,
 }
@@ -23,10 +23,6 @@ const BATCH_SIZE: usize = 12;
 
 impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub fn with_threads(threads: usize, epoch_tick: u64, retire_tick: usize) -> Self {
-        if SLOTS > u8::MAX as _ {
-            panic!("slots cannot be greater than {}", u8::MAX);
-        }
-
         Self {
             epoch: AtomicU64::new(1),
             slots: ThreadLocal::with_capacity(threads),
@@ -38,10 +34,13 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 
     pub fn node_for<T>(&self) -> Node {
-        let n = self.links.get_or_default().fetch_add(1, Ordering::Relaxed);
+        let n = self.links.get_or_default().get();
 
-        if (n + 1) % self.epoch_tick == 0 {
-            self.epoch.fetch_add(1, Ordering::AcqRel);
+        unsafe {
+            *n += 1;
+            if *n % self.epoch_tick == 0 {
+                self.epoch.fetch_add(1, Ordering::AcqRel);
+            }
         }
 
         Node {
@@ -214,11 +213,13 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
             loop {
                 if prev == Node::INACTIVE {
+                    curr = (*curr).batch.next;
                     continue 'walk;
                 }
 
                 let epoch = slot_epoch.load(Ordering::Acquire);
                 if epoch < min_epoch {
+                    curr = (*curr).batch.next;
                     continue 'walk;
                 }
 
@@ -240,7 +241,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             (*refs)
                 .reservation
                 .next
-                .store(ptr::null_mut(), Ordering::SeqCst);
+                .store(ptr::null_mut(), Ordering::Release);
             Crystalline::<SLOTS>::free_batch(&mut *refs);
         }
 
