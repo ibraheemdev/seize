@@ -1,4 +1,5 @@
 use crate::utils::{self, CachePadded, U64Padded};
+use crate::Linked;
 
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
@@ -11,7 +12,7 @@ pub struct Crystalline<const SLOTS: usize> {
     epoch: AtomicU64,
     slots: ThreadLocal<CachePadded<Slots<SLOTS>>>,
     batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
-    allocs: ThreadLocal<AtomicU64>,
+    links: ThreadLocal<AtomicU64>,
 }
 
 const EPOCH_TICK: u64 = 110;
@@ -28,12 +29,12 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             epoch: AtomicU64::new(1),
             slots: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
-            allocs: ThreadLocal::with_capacity(threads),
+            links: ThreadLocal::with_capacity(threads),
         }
     }
 
-    pub fn alloc<T>(&self, value: T) -> Box<Linked<T>> {
-        let count = self.allocs.get_or_default().fetch_add(1, Ordering::Relaxed);
+    pub fn node_for<T>(&self) -> Node {
+        let count = self.links.get_or_default().fetch_add(1, Ordering::Relaxed);
 
         if (count + 1) % EPOCH_TICK == 0 {
             self.epoch.fetch_add(1, Ordering::AcqRel);
@@ -43,31 +44,30 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             let _ = Box::from_raw(Linked::<T>::from_node(node));
         }
 
-        let data = Linked {
-            value,
-            node: Node {
-                drop: drop_node::<T>,
-                batch_link: ptr::null_mut(),
-                birth_epoch: self.epoch(),
-                reservation: ReservationNode {
-                    next: ManuallyDrop::new(AtomicPtr::default()),
-                },
-                batch: BatchNode {
-                    ref_count: ManuallyDrop::new(AtomicUsize::default()),
-                },
+        Node {
+            drop: drop_node::<T>,
+            batch_link: ptr::null_mut(),
+            birth_epoch: self.epoch(),
+            reservation: ReservationNode {
+                next: ManuallyDrop::new(AtomicPtr::default()),
             },
-        };
-
-        Box::new(data)
+            batch: BatchNode {
+                ref_count: ManuallyDrop::new(AtomicUsize::default()),
+            },
+        }
     }
 
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering, index: usize) -> *mut T {
+    pub fn protect<T>(
+        &self,
+        mut op: impl FnMut() -> *mut Linked<T>,
+        index: usize,
+    ) -> *mut Linked<T> {
         let slot = self.slots.get_or_default();
 
         let mut prev_epoch = slot.epoch[index].load(Ordering::Acquire);
 
         loop {
-            let ptr = ptr.load(ordering);
+            let ptr = op();
             let current_epoch = self.epoch();
 
             if prev_epoch == current_epoch {
@@ -336,12 +336,6 @@ union ReservationNode {
 union BatchNode {
     ref_count: ManuallyDrop<AtomicUsize>,
     next: *mut Node,
-}
-
-#[repr(C)]
-pub struct Linked<T> {
-    node: Node, // Invariant: Info must come first
-    pub(crate) value: T,
 }
 
 impl<T> Linked<T> {
