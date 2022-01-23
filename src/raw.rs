@@ -195,7 +195,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
                     return;
                 }
 
-                (*last).reservation.slot = slot.first.as_ptr().add(i);
+                (*last).reservation.slot = (slot as *const _ as *const AtomicPtr<Node>).add(i);
                 last = (*last).batch.next;
             }
         }
