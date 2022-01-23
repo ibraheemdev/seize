@@ -1,4 +1,4 @@
-use crate::utils::CachePadded;
+use crate::utils::{self, CachePadded, U64Padded};
 
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
@@ -292,14 +292,22 @@ unsafe impl Sync for Batch {}
 
 #[repr(C)]
 struct Slots<const SLOTS: usize> {
-    first: [AtomicPtr<Node>; SLOTS],
+    first: [U64Padded<AtomicPtr<Node>>; SLOTS],
     epoch: [AtomicU64; SLOTS],
 }
+
+utils::const_assert!(
+    // We need the size of the elements of `slots.first` to be equal
+    // `slots.epoch`, in order to jump between the two from the pointer
+    // stored in `node.reservation.slot`. That way `ReservationNode` stays 64
+    // bits.
+    std::mem::size_of::<U64Padded<AtomicPtr<Node>>>() == std::mem::size_of::<AtomicU64>()
+);
 
 impl<const SLOTS: usize> Default for Slots<SLOTS> {
     fn default() -> Self {
         const ZERO: AtomicU64 = AtomicU64::new(0);
-        const INACTIVE: AtomicPtr<Node> = AtomicPtr::new(Node::INACTIVE);
+        const INACTIVE: U64Padded<AtomicPtr<Node>> = U64Padded::new(AtomicPtr::new(Node::INACTIVE));
 
         Slots {
             first: [INACTIVE; SLOTS],

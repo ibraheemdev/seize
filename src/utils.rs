@@ -48,3 +48,44 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
         &mut self.value
     }
 }
+
+/// Pads a pointer to 64 bits.
+pub struct U64Padded<T> {
+    ptr: T,
+    _pad: [u8; std::mem::size_of::<u64>() - std::mem::size_of::<*mut ()>()],
+}
+
+impl<T> U64Padded<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            ptr: value,
+            _pad: [0; std::mem::size_of::<u64>() - std::mem::size_of::<*mut ()>()],
+        }
+    }
+}
+
+impl<T> std::ops::Deref for U64Padded<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ptr
+    }
+}
+
+impl<T> std::ops::DerefMut for U64Padded<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ptr
+    }
+}
+
+macro_rules! const_assert {
+    ($x:expr $(,)?) => {
+        #[allow(unknown_lints, eq_op)]
+        const _: [(); 0 - !{
+            const ASSERT: bool = $x;
+            ASSERT
+        } as usize] = [];
+    };
+}
+
+pub(crate) use const_assert;
