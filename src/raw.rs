@@ -1,5 +1,5 @@
 use crate::utils::{self, CachePadded, U64Padded};
-use crate::Linked;
+use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
@@ -40,12 +40,8 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             self.epoch.fetch_add(1, Ordering::AcqRel);
         }
 
-        unsafe fn drop_node<T>(node: *mut Node) {
-            let _ = Box::from_raw(Linked::<T>::from_node(node));
-        }
-
         Node {
-            drop: drop_node::<T>,
+            retire: |_| {},
             batch_link: ptr::null_mut(),
             birth_epoch: self.epoch(),
             reservation: ReservationNode {
@@ -78,11 +74,13 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         }
     }
 
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>) {
+    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "Attempted to retire null pointer");
 
         let batch = &mut *self.batches.get_or_default().get();
         let node = ptr::addr_of_mut!((*ptr).node);
+
+        (*node).retire = retire;
 
         if batch.first.is_null() {
             batch.min_epoch = (*node).birth_epoch;
@@ -165,7 +163,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
             loop {
                 let node = start;
                 start = (*node).batch.next;
-                ((*node).drop)(node);
+                ((*node).retire)(Link { node });
 
                 if start.is_null() {
                     break;
@@ -319,7 +317,7 @@ impl<const SLOTS: usize> Default for Slots<SLOTS> {
 pub struct Node {
     batch: BatchNode,
     reservation: ReservationNode,
-    drop: unsafe fn(*mut Node),
+    retire: unsafe fn(Link),
     batch_link: *mut Node,
     birth_epoch: u64,
 }
@@ -336,10 +334,4 @@ union ReservationNode {
 union BatchNode {
     ref_count: ManuallyDrop<AtomicUsize>,
     next: *mut Node,
-}
-
-impl<T> Linked<T> {
-    unsafe fn from_node(node: *mut Node) -> *mut Linked<T> {
-        node as _
-    }
 }

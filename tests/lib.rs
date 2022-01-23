@@ -1,11 +1,11 @@
-use crystalline::{Crystalline, Protect};
+use crystalline::{retire_boxed, Crystalline, Protect};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Barrier};
 
 #[test]
 fn it_works() {
     const PROTECT_ONE: Protect = Protect(0);
-    const PROTECT_TWO: Protect = Protect(1);
+    const PROTECT_TWO: Protect = Protect(0);
 
     struct Foo(usize);
 
@@ -22,7 +22,7 @@ fn it_works() {
 
         let guard = crystalline.guard();
         let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_ONE);
-        unsafe { guard.retire(value) }
+        unsafe { guard.retire(value.as_ptr(), retire_boxed::<Foo>) }
 
         println!("{}", unsafe { value.deref().0 });
     }
@@ -31,7 +31,7 @@ fn it_works() {
         let barrier = Arc::new(Barrier::new(2));
         let foo = Arc::new(AtomicPtr::new(crystalline.link_boxed(Foo(99))));
 
-        std::thread::spawn({
+        let h = std::thread::spawn({
             let foo = foo.clone();
             let barrier = barrier.clone();
             let crystalline = crystalline.clone();
@@ -52,8 +52,9 @@ fn it_works() {
         let guard = crystalline.guard();
         let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_TWO);
         println!("{}", unsafe { value.deref().0 });
-        unsafe { guard.retire(value) }
+        unsafe { guard.retire(value.as_ptr(), retire_boxed::<Foo>) }
 
         barrier.wait(); // wait for thread to drop guard
+        h.join().unwrap();
     }
 }

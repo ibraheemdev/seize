@@ -29,16 +29,19 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 
     pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
-        Box::into_raw(Box::new(Linked {
-            value,
-            node: self.raw.node_for::<T>(),
-        }))
+        Box::into_raw(Box::new(self.link(value)))
     }
 }
 
 pub struct Shared<'g, T> {
     ptr: *mut Linked<T>,
     guard: PhantomData<&'g T>,
+}
+
+impl<T> Shared<'_, T> {
+    pub fn as_ptr(&self) -> *mut Linked<T> {
+        self.ptr
+    }
 }
 
 impl<T> Clone for Shared<'_, T> {
@@ -66,17 +69,17 @@ pub struct Guard<'a, const SLOTS: usize> {
 }
 
 impl<'g, const SLOTS: usize> Guard<'g, SLOTS> {
-    pub unsafe fn retire<T>(&self, shared: Shared<'_, T>) {
-        self.crystalline.raw.retire(shared.ptr)
+    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
+        self.crystalline.raw.retire(ptr, retire)
     }
 
     pub fn protect<T>(
         &self,
         op: impl FnMut() -> *mut Linked<T>,
-        token: Protect,
+        protect: Protect,
     ) -> Shared<'g, T> {
         Shared {
-            ptr: self.crystalline.raw.protect(op, token.0),
+            ptr: self.crystalline.raw.protect(op, protect.0),
             guard: PhantomData,
         }
     }
@@ -88,8 +91,26 @@ impl<const SLOTS: usize> Drop for Guard<'_, SLOTS> {
     }
 }
 
+pub struct Link {
+    node: *mut raw::Node,
+}
+
+impl Link {
+    pub unsafe fn as_ptr<T>(&mut self) -> *mut Linked<T> {
+        self.node as *mut _
+    }
+}
+
 #[repr(C)]
 pub struct Linked<T> {
     node: raw::Node,
     pub value: T,
+}
+
+pub unsafe fn retire_boxed<T>(mut link: Link) {
+    let _ = Box::from_raw(link.as_ptr::<T>());
+}
+
+pub unsafe fn retire_in_place<T>(mut link: Link) {
+    let _ = std::ptr::drop_in_place(link.as_ptr::<T>());
 }
