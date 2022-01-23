@@ -1,3 +1,5 @@
+use crate::utils::CachePadded;
+
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -7,8 +9,8 @@ use thread_local::ThreadLocal;
 
 pub struct Crystalline<const SLOTS: usize> {
     epoch: AtomicU64,
-    slots: ThreadLocal<Slots<SLOTS>>,
-    batches: ThreadLocal<UnsafeCell<Batch>>,
+    slots: ThreadLocal<CachePadded<Slots<SLOTS>>>,
+    batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
     allocs: ThreadLocal<AtomicU64>,
 }
 
