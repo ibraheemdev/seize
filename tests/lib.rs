@@ -1,10 +1,10 @@
-use crystalline::{retire, Crystalline};
+use seize::Collector;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Barrier};
 
 #[test]
 fn it_works() {
-    crystalline::protection! {
+    seize::protection! {
         enum Protect {
             All,
         }
@@ -20,26 +20,26 @@ fn it_works() {
         }
     }
 
-    let crystalline = Arc::new(Crystalline::<Protect>::new().retire_frequency(1));
+    let collector = Arc::new(Collector::new().retire_frequency(1));
 
-    let zero = AtomicPtr::new(crystalline.link_boxed(Foo(0)));
+    let zero = AtomicPtr::new(collector.link_boxed(Foo(0)));
 
-    let guard = crystalline.guard();
+    let guard = collector.guard();
     let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
-    unsafe { guard.retire(value, retire::boxed::<Foo>) }
+    unsafe { guard.seize(value, seize::boxed::<Foo>) }
 
     println!("{}", unsafe { (*value).0 });
 
     let barrier = Arc::new(Barrier::new(2));
-    let one = Arc::new(AtomicPtr::new(crystalline.link_boxed(Foo(1))));
+    let one = Arc::new(AtomicPtr::new(collector.link_boxed(Foo(1))));
 
     let h = std::thread::spawn({
         let foo = one.clone();
         let barrier = barrier.clone();
-        let crystalline = crystalline.clone();
+        let collector = collector.clone();
 
         move || {
-            let guard = crystalline.guard();
+            let guard = collector.guard();
             let value = guard.protect(|| foo.load(Ordering::Acquire), Protect::All);
             println!("{}", unsafe { (*value).0 });
 
@@ -51,10 +51,10 @@ fn it_works() {
 
     barrier.wait(); // wait for thread to access value
 
-    let guard = crystalline.guard();
+    let guard = collector.guard();
     let value = guard.protect(|| one.load(Ordering::Acquire), Protect::All);
     println!("{}", unsafe { (*value).0 });
-    unsafe { guard.retire(value, retire::boxed::<Foo>) }
+    unsafe { guard.seize(value, seize::boxed::<Foo>) }
 
     barrier.wait(); // wait for thread to drop guard
     h.join().unwrap();

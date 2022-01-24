@@ -5,10 +5,12 @@ use std::ops::{Index, IndexMut};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64};
 
-pub unsafe trait Protect: Send + Sync + Into<usize> {
+pub unsafe trait Protect: Send + Sync {
     const SLOTS: usize;
 
     type Slots: internal::Slots;
+
+    fn as_index(self) -> usize;
 }
 
 #[macro_export]
@@ -21,15 +23,13 @@ macro_rules! protection {
         }
 
         const _: () = {
-            impl ::std::convert::Into<usize> for $name {
-                fn into(self) -> usize {
+            unsafe impl ::seize::Protect for $name {
+                const SLOTS: usize = [$($name::$variant),+].len();
+                type Slots = ::seize::Slots<{ <$name as ::seize::Protect>::SLOTS }>;
+
+                fn as_index(self) -> usize {
                     self as _
                 }
-            }
-
-            unsafe impl ::crystalline::Protect for $name {
-                const SLOTS: usize = [$($name::$variant),+].len();
-                type Slots = ::crystalline::Slots<{ <$name as ::crystalline::Protect>::SLOTS }>;
             }
         };
     }
