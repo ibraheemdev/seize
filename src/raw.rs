@@ -8,37 +8,51 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
+// Fast, lock-free, robust concurrent memory reclamation.
+//
+// The core algorithm is described [in this paper](https://arxiv.org/pdf/2108.02763.pdf).
 pub struct Collector<P: Protect> {
+    // The global epoch value.
     epoch: AtomicU64,
+    // Per-thread, reservations list slots.
     slots: ThreadLocal<CachePadded<Slots<P>>>,
+    // Per-thread batches of retired nodes.
     batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
-    links: ThreadLocal<UnsafeCell<u64>>,
-    pub(crate) epoch_tick: u64,
-    pub(crate) retire_tick: usize,
+    // The number of nodes allocated per-thread.
+    node_count: ThreadLocal<UnsafeCell<u64>>,
+    // The number of node allocations before advancing the global epoch.
+    pub(crate) epoch_frequency: u64,
+    // The number of nodes in a batch before we free.
+    pub(crate) max_batch_size: usize,
 }
 
-// The number of nodes we store in a batch before
-// freeing.
-const BATCH_SIZE: usize = 12;
-
 impl<P: Protect> Collector<P> {
-    pub fn with_threads(threads: usize, epoch_tick: u64, retire_tick: usize) -> Self {
+    pub fn with_threads(threads: usize, epoch_frequency: u64, batch_size: usize) -> Self {
         Self {
             epoch: AtomicU64::new(1),
             slots: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
-            links: ThreadLocal::with_capacity(threads),
-            epoch_tick,
-            retire_tick,
+            node_count: ThreadLocal::with_capacity(threads),
+            epoch_frequency,
+            max_batch_size: batch_size,
         }
     }
 
-    pub fn node_for<T>(&self) -> Node {
-        let n = self.links.get_or(Default::default).get();
+    // Loads the current epoch value.
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
 
+    // Create a new node, storing the current epoch value.
+    pub fn node(&self) -> Node {
+        let count = self.node_count.get_or(Default::default).get();
+
+        // SAFETY: node counts are only accessed by the current thread
         unsafe {
-            *n += 1;
-            if *n % self.epoch_tick == 0 {
+            *count += 1;
+
+            if *count % self.epoch_frequency == 0 {
+                // advance the global epoch
                 self.epoch.fetch_add(1, Ordering::AcqRel);
             }
         }
@@ -46,9 +60,8 @@ impl<P: Protect> Collector<P> {
         Node {
             drop: |_| {},
             batch_link: ptr::null_mut(),
-            birth_epoch: self.epoch(),
             reservation: ReservationNode {
-                next: ManuallyDrop::new(AtomicPtr::default()),
+                birth_epoch: self.epoch(),
             },
             batch: BatchNode {
                 ref_count: ManuallyDrop::new(AtomicUsize::default()),
@@ -56,13 +69,14 @@ impl<P: Protect> Collector<P> {
         }
     }
 
-    pub fn protect<T>(&self, mut op: impl FnMut() -> *mut T, index: usize) -> *mut T {
+    // Protect an atomic load
+    pub fn protect<T>(&self, mut load: impl FnMut() -> *mut T, index: usize) -> *mut T {
         let slot = self.slots.get_or(Default::default);
 
         let mut prev_epoch = slot.epoch[index].load(Ordering::Acquire);
 
         loop {
-            let ptr = op();
+            let ptr = load();
             let current_epoch = self.epoch();
 
             if prev_epoch == current_epoch {
@@ -73,6 +87,41 @@ impl<P: Protect> Collector<P> {
         }
     }
 
+    // Clean up the old reservation list and set a new epoch.
+    fn update_epoch(&self, slot: &Slots<P>, mut current_epoch: u64, index: usize) -> u64 {
+        if !slot.head[index].load(Ordering::Acquire).is_null() {
+            let first = slot.head[index].swap(Node::INACTIVE, Ordering::AcqRel);
+
+            if first != Node::INACTIVE {
+                unsafe {
+                    let batch = self.batches.get_or(Default::default).get();
+                    Collector::<P>::clean_up(&mut *batch, first)
+                }
+            }
+
+            slot.head[index].store(ptr::null_mut(), Ordering::SeqCst);
+            current_epoch = self.epoch();
+        }
+
+        slot.epoch[index].store(current_epoch, Ordering::SeqCst);
+        current_epoch
+    }
+
+    // Clean up the old reservation list
+    unsafe fn clean_up(batch: &mut Batch, next: *mut Node) {
+        if !next.is_null() {
+            if batch.age == MAX_AGE {
+                Collector::<P>::free_list(batch.list);
+                batch.list = ptr::null_mut();
+                batch.age = 0;
+            }
+
+            batch.age += 1;
+            Collector::<P>::traverse(next, batch);
+        }
+    }
+
+    // Defer deallocation of a value until no threads reference it
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "Attempted to retire null pointer");
 
@@ -81,107 +130,79 @@ impl<P: Protect> Collector<P> {
 
         (*node).drop = retire;
 
-        if batch.first.is_null() {
-            batch.min_epoch = (*node).birth_epoch;
-            batch.last = node;
+        if batch.head.is_null() {
+            batch.min_epoch = (*node).reservation.birth_epoch;
+            batch.tail = node;
         } else {
-            if batch.min_epoch > (*node).birth_epoch {
-                batch.min_epoch = (*node).birth_epoch;
+            if batch.min_epoch > (*node).reservation.birth_epoch {
+                batch.min_epoch = (*node).reservation.birth_epoch;
             }
 
-            (*node).batch_link = batch.last;
+            (*node).batch_link = batch.tail;
         }
 
-        (*node).batch.next = batch.first;
-        batch.first = node;
-        batch.counter += 1;
+        (*node).batch.next = batch.head;
+        batch.head = node;
+        batch.size += 1;
 
-        if batch.counter % self.retire_tick == 0 {
-            (*batch.last).batch_link = node;
+        if batch.size % self.max_batch_size == 0 {
+            (*batch.tail).batch_link = node;
             self.try_retire(batch);
         }
     }
 
+    // Clear all protected slots.
     pub unsafe fn clear_all(&self) {
         let batch = &mut *self.batches.get_or(Default::default).get();
 
-        let mut first: protect::Nodes<P> = Default::default();
+        let mut list: protect::Nodes<P> = Default::default();
 
         for i in 0..P::SLOTS {
-            first[i] =
-                self.slots.get_or(Default::default).first[i].swap(Node::INACTIVE, Ordering::AcqRel);
+            list[i] =
+                self.slots.get_or(Default::default).head[i].swap(Node::INACTIVE, Ordering::AcqRel);
         }
 
         for i in 0..P::SLOTS {
-            if first[i] != Node::INACTIVE {
-                Collector::<P>::traverse(batch, first[i])
+            if list[i] != Node::INACTIVE {
+                Collector::<P>::traverse(list[i], batch)
             }
         }
 
-        Collector::<P>::free_batch(batch.nodes);
-        batch.nodes = ptr::null_mut();
-        batch.node_count = 0;
+        Collector::<P>::free_list(batch.list);
+        batch.list = ptr::null_mut();
+        batch.age = 0;
     }
 
-    fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
-    }
-
-    unsafe fn traverse(batch: &mut Batch, mut next: *mut Node) {
+    // Traverse the reservation list, decrementing the refernce
+    // count of each batch.
+    unsafe fn traverse(mut list: *mut Node, batch: &mut Batch) {
         loop {
-            let curr = next;
+            let curr = list;
             if curr.is_null() {
                 break;
             }
 
-            next = (*curr).reservation.next.load(Ordering::Acquire);
+            list = (*curr).reservation.next.load(Ordering::Acquire);
+
             let node = &mut *(*curr).batch_link;
             if node.batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                node.reservation.next.store(batch.nodes, Ordering::Release);
-                batch.nodes = node;
+                node.reservation.next.store(batch.list, Ordering::Release);
+                batch.list = node;
             }
         }
     }
 
-    unsafe fn traverse_cache(batch: &mut Batch, next: *mut Node) {
-        if !next.is_null() {
-            if batch.node_count == BATCH_SIZE {
-                Collector::<P>::free_batch(batch.nodes);
-                batch.nodes = ptr::null_mut();
-                batch.node_count = 0;
-            }
-            batch.node_count += 1;
-            Collector::<P>::traverse(batch, next);
-        }
-    }
-
-    unsafe fn free_batch(mut nodes: *mut Node) {
-        while !nodes.is_null() {
-            let mut start = (*nodes).batch_link;
-            nodes = (*nodes).reservation.next.load(Ordering::Acquire);
-
-            loop {
-                let node = start;
-                start = (*node).batch.next;
-                ((*node).drop)(Link { node });
-
-                if start.is_null() {
-                    break;
-                }
-            }
-        }
-    }
-
+    // Attempt to retire nodes in this batch.
     unsafe fn try_retire(&self, batch: &mut Batch) {
-        let mut curr = batch.first;
-        let refs = batch.last;
+        let mut curr = batch.head;
+        let refs = batch.tail;
         let min_epoch = batch.min_epoch;
 
         let mut last = curr;
 
         for slot in self.slots.iter() {
             for i in 0..P::SLOTS {
-                let first = slot.first[i].load(Ordering::Acquire);
+                let first = slot.head[i].load(Ordering::Acquire);
                 if first == Node::INACTIVE {
                     continue;
                 }
@@ -200,7 +221,7 @@ impl<P: Protect> Collector<P> {
             }
         }
 
-        let mut adjs = 0;
+        let mut count = 0;
 
         'walk: while curr != last {
             let slot_first = &*(*curr).reservation.slot;
@@ -230,58 +251,139 @@ impl<P: Protect> Collector<P> {
                 }
             }
 
-            adjs += 1;
+            count += 1;
             curr = (*curr).batch.next;
         }
 
-        if (*refs).batch.ref_count.fetch_add(adjs, Ordering::AcqRel) == 0 && adjs == 0 {
+        if (*refs).batch.ref_count.fetch_add(count, Ordering::AcqRel) + count == 0 {
             (*refs)
                 .reservation
                 .next
                 .store(ptr::null_mut(), Ordering::Release);
-            Collector::<P>::free_batch(&mut *refs);
+            Collector::<P>::free_list(&mut *refs);
         }
 
-        batch.first = ptr::null_mut();
-        batch.counter = 0;
+        batch.head = ptr::null_mut();
+        batch.size = 0;
     }
 
-    fn update_epoch(&self, slot: &Slots<P>, mut current_epoch: u64, index: usize) -> u64 {
-        if !slot.first[index].load(Ordering::Acquire).is_null() {
-            let first = slot.first[index].swap(Node::INACTIVE, Ordering::AcqRel);
-            if first != Node::INACTIVE {
-                unsafe {
-                    let batch = self.batches.get_or(Default::default).get();
-                    Collector::<P>::traverse_cache(&mut *batch, first)
+    // Free the reservation list.
+    unsafe fn free_list(mut list: *mut Node) {
+        while !list.is_null() {
+            let mut start = (*list).batch_link;
+            list = (*list).reservation.next.load(Ordering::Acquire);
+
+            loop {
+                let node = start;
+                start = (*node).batch.next;
+                ((*node).drop)(Link { node });
+
+                if start.is_null() {
+                    break;
                 }
             }
-
-            slot.first[index].store(ptr::null_mut(), Ordering::SeqCst);
-            current_epoch = self.epoch();
         }
-
-        slot.epoch[index].store(current_epoch, Ordering::SeqCst);
-        current_epoch
     }
 }
 
+utils::const_assert!(
+    // We need the size of the elements of `reservation.first` to be equal
+    // `reservation.epoch`, in order to jump between the two from the pointer
+    // stored in `node.reservation.slot`. That way `ReservationNode` stays 64
+    // bits.
+    std::mem::size_of::<U64Padded<AtomicPtr<Node>>>() == std::mem::size_of::<AtomicU64>()
+);
+
+// Node is attached to every allocated object.
+//
+// When a node is retired, it becomes one of two types:
+// - REFS: the first node in a batch (last in the list), holds the reference counter
+// - SLOT: Everyone else
+pub struct Node {
+    // REFS: first slot node
+    // SLOTS: pointer to REFS
+    batch_link: *mut Node,
+    // Vertical batch list
+    batch: BatchNode,
+    // Horizontal reservation list
+    reservation: ReservationNode,
+    // User provided drop glue
+    drop: unsafe fn(Link),
+}
+
+union ReservationNode {
+    // Before retiring: The epoch value when this node was created
+    birth_epoch: u64,
+    // SLOT (while retiring): next node in the reservation list
+    next: ManuallyDrop<AtomicPtr<Node>>,
+    // SLOT (after retiring): reservation slot
+    slot: *const AtomicPtr<Node>,
+}
+
+union BatchNode {
+    // REFS: reference counter
+    ref_count: ManuallyDrop<AtomicUsize>,
+    // SLOT: next node in the batch
+    next: *mut Node,
+}
+
+impl Node {
+    // Represents an inactive thread
+    //
+    // While null indicates an empty list, INACTIVE
+    // indicates the thread is not performing
+    // an operation on the datastructure.
+    //
+    // Note that operatign systems reserve -` for errors,
+    // and it will never represent a valid pointer.
+    pub const INACTIVE: *mut Node = -1_isize as usize as _;
+}
+
+// Per-slot reservation lists.
+#[repr(C)]
+struct Slots<P: Protect> {
+    // The head node of the resevation list.
+    head: protect::AtomicNodes<P>,
+    // The epoch value when this slot was last accessed.
+    epoch: protect::Epochs<P>,
+}
+
+impl<P: Protect> Default for Slots<P> {
+    fn default() -> Self {
+        Slots {
+            head: protect::AtomicNodes::<P>::default(),
+            epoch: protect::Epochs::<P>::default(),
+        }
+    }
+}
+
+// A batch of nodes waiting to be retired.
 struct Batch {
-    first: *mut Node,
-    last: *mut Node,
-    nodes: *mut Node,
-    node_count: usize,
-    counter: usize,
+    // Head the batch
+    head: *mut Node,
+    // Tail of the batch (REFS)
+    tail: *mut Node,
+    // The number of nodes in this batch.
+    size: usize,
+    // Head of the reservation list
+    list: *mut Node,
+    // The number of times the epoch was updated.
+    age: usize,
+    // The minimum epoch across all nodes in this batch.
     min_epoch: u64,
 }
+
+// The maximum age of a batch before the reservation list is reset.
+const MAX_AGE: usize = 12;
 
 impl Default for Batch {
     fn default() -> Self {
         Batch {
-            first: ptr::null_mut(),
-            last: ptr::null_mut(),
-            nodes: ptr::null_mut(),
-            node_count: 0,
-            counter: 0,
+            head: ptr::null_mut(),
+            tail: ptr::null_mut(),
+            list: ptr::null_mut(),
+            age: 0,
+            size: 0,
             min_epoch: 0,
         }
     }
@@ -289,52 +391,3 @@ impl Default for Batch {
 
 unsafe impl Send for Batch {}
 unsafe impl Sync for Batch {}
-
-#[repr(C)]
-struct Slots<P: Protect> {
-    first: protect::AtomicNodes<P>,
-    epoch: protect::Epochs<P>,
-}
-
-pub const DEFAULT_FIRST_NODE: U64Padded<AtomicPtr<Node>> =
-    U64Padded::new(AtomicPtr::new(Node::INACTIVE));
-pub const DEFAULT_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-impl<P: Protect> Default for Slots<P> {
-    fn default() -> Self {
-        Slots {
-            first: protect::AtomicNodes::<P>::default(),
-            epoch: protect::Epochs::<P>::default(),
-        }
-    }
-}
-
-utils::const_assert!(
-    // We need the size of the elements of `slots.first` to be equal
-    // `slots.epoch`, in order to jump between the two from the pointer
-    // stored in `node.reservation.slot`. That way `ReservationNode` stays 64
-    // bits.
-    std::mem::size_of::<U64Padded<AtomicPtr<Node>>>() == std::mem::size_of::<AtomicU64>()
-);
-
-pub struct Node {
-    batch: BatchNode,
-    reservation: ReservationNode,
-    drop: unsafe fn(Link),
-    batch_link: *mut Node,
-    birth_epoch: u64,
-}
-
-impl Node {
-    pub(crate) const INACTIVE: *mut Node = -1_isize as usize as _;
-}
-
-union ReservationNode {
-    next: ManuallyDrop<AtomicPtr<Node>>,
-    slot: *const AtomicPtr<Node>,
-}
-
-union BatchNode {
-    ref_count: ManuallyDrop<AtomicUsize>,
-    next: *mut Node,
-}

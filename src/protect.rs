@@ -1,4 +1,4 @@
-use crate::raw::{self, Node};
+use crate::raw::Node;
 use crate::utils::U64Padded;
 
 use std::ops::{Index, IndexMut};
@@ -91,13 +91,18 @@ impl<const N: usize> Default for Array<*mut Node, N> {
 
 impl<const N: usize> Default for Array<AtomicU64, N> {
     fn default() -> Self {
-        Self([raw::DEFAULT_EPOCH; N])
+        pub const ZERO: AtomicU64 = AtomicU64::new(0);
+
+        Self([ZERO; N])
     }
 }
 
 impl<const N: usize> Default for Array<U64Padded<AtomicPtr<Node>>, N> {
     fn default() -> Self {
-        Self([raw::DEFAULT_FIRST_NODE; N])
+        pub const INACTIVE: U64Padded<AtomicPtr<Node>> =
+            U64Padded::new(AtomicPtr::new(Node::INACTIVE));
+
+        Self([INACTIVE; N])
     }
 }
 

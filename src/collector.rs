@@ -21,12 +21,12 @@ impl<P: Protect> Collector<P> {
     }
 
     pub fn epoch_frequency(mut self, n: u64) -> Self {
-        self.raw.epoch_tick = n;
+        self.raw.epoch_frequency = n;
         self
     }
 
-    pub fn retire_frequency(mut self, n: usize) -> Self {
-        self.raw.retire_tick = n;
+    pub fn batch_size(mut self, n: usize) -> Self {
+        self.raw.max_batch_size = n;
         self
     }
 
@@ -40,7 +40,7 @@ impl<P: Protect> Collector<P> {
     pub fn link<T>(&self, value: T) -> Linked<T> {
         Linked {
             value,
-            node: self.raw.node_for::<T>(),
+            node: self.raw.node(),
         }
     }
 
