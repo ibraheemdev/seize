@@ -20,7 +20,7 @@ fn it_works() {
         }
     }
 
-    let collector = Arc::new(Collector::new().retire_frequency(1));
+    let collector = Arc::new(Collector::new().batch_size(1));
 
     let zero = AtomicPtr::new(collector.link_boxed(Foo(0)));
 

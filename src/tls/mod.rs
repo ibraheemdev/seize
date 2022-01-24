@@ -19,7 +19,7 @@ const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
-    values: AtomicUsize,
+    count: AtomicUsize,
     lock: Mutex<()>,
 }
 
@@ -64,7 +64,7 @@ where
             // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
             // representation as a sequence of their inner type.
             buckets: unsafe { mem::transmute(buckets) },
-            values: AtomicUsize::new(0),
+            count: AtomicUsize::new(0),
             lock: Mutex::new(()),
         }
     }
@@ -125,7 +125,7 @@ where
         unsafe { value_ptr.write(MaybeUninit::new(data)) };
         entry.present.store(true, Ordering::Release);
 
-        self.values.fetch_add(1, Ordering::Release);
+        self.count.fetch_add(1, Ordering::Release);
 
         unsafe { &*(&*value_ptr).as_ptr() }
     }
@@ -135,11 +135,12 @@ where
         T: Sync,
     {
         Iter {
-            thread_local: self,
             yielded: 0,
             bucket: 0,
             bucket_size: 1,
             index: 0,
+            thread_local: self,
+            count: self.count.load(Ordering::Acquire),
         }
     }
 }
@@ -173,6 +174,7 @@ where
     T: Send + Sync,
 {
     thread_local: &'a ThreadLocal<T>,
+    count: usize,
     yielded: usize,
     bucket: usize,
     bucket_size: usize,
@@ -186,7 +188,11 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.bucket < BUCKETS {
+        if self.count == self.yielded {
+            return None;
+        }
+
+        loop {
             let bucket = unsafe { self.thread_local.buckets.get_unchecked(self.bucket) };
             let bucket = bucket.load(Ordering::Acquire);
 
@@ -204,10 +210,10 @@ where
             if self.bucket != 0 {
                 self.bucket_size <<= 1;
             }
+
             self.bucket += 1;
             self.index = 0;
         }
-        None
     }
 }
 
@@ -295,6 +301,18 @@ mod tests {
         let mut v = tls.iter().map(|x| **x).collect::<Vec<i32>>();
         v.sort_unstable();
         assert_eq!(vec![1, 2, 3], v);
+    }
+
+    #[test]
+    fn iter_snapshot() {
+        let tls = Arc::new(ThreadLocal::with_capacity(1));
+        tls.get_or(|| Box::new(1));
+
+        let iterator = tls.iter();
+        tls.get_or(|| Box::new(2));
+
+        let v = iterator.map(|x| **x).collect::<Vec<i32>>();
+        assert_eq!(vec![1], v);
     }
 
     #[test]
