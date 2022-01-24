@@ -1,3 +1,4 @@
+use crate::protect::{self, Protect};
 use crate::tls::ThreadLocal;
 use crate::utils::{self, CachePadded, U64Padded};
 use crate::{Link, Linked};
@@ -7,9 +8,9 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-pub struct Crystalline<const SLOTS: usize> {
+pub struct Crystalline<P: Protect> {
     epoch: AtomicU64,
-    slots: ThreadLocal<CachePadded<Slots<SLOTS>>>,
+    slots: ThreadLocal<CachePadded<Slots<P>>>,
     batches: ThreadLocal<UnsafeCell<CachePadded<Batch>>>,
     links: ThreadLocal<UnsafeCell<u64>>,
     pub(crate) epoch_tick: u64,
@@ -20,7 +21,7 @@ pub struct Crystalline<const SLOTS: usize> {
 // freeing.
 const BATCH_SIZE: usize = 12;
 
-impl<const SLOTS: usize> Crystalline<SLOTS> {
+impl<P: Protect> Crystalline<P> {
     pub fn with_threads(threads: usize, epoch_tick: u64, retire_tick: usize) -> Self {
         Self {
             epoch: AtomicU64::new(1),
@@ -108,20 +109,20 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     pub unsafe fn clear_all(&self) {
         let batch = &mut *self.batches.get_or(Default::default).get();
 
-        let mut first: [*mut Node; SLOTS] = [ptr::null_mut(); SLOTS];
+        let mut first: protect::Nodes<P> = Default::default();
 
-        for i in 0..SLOTS {
+        for i in 0..P::SLOTS {
             first[i] =
                 self.slots.get_or(Default::default).first[i].swap(Node::INACTIVE, Ordering::AcqRel);
         }
 
-        for i in 0..SLOTS {
+        for i in 0..P::SLOTS {
             if first[i] != Node::INACTIVE {
-                Crystalline::<SLOTS>::traverse(batch, first[i])
+                Crystalline::<P>::traverse(batch, first[i])
             }
         }
 
-        Crystalline::<SLOTS>::free_batch(batch.nodes);
+        Crystalline::<P>::free_batch(batch.nodes);
         batch.nodes = ptr::null_mut();
         batch.node_count = 0;
     }
@@ -149,12 +150,12 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     unsafe fn traverse_cache(batch: &mut Batch, next: *mut Node) {
         if !next.is_null() {
             if batch.node_count == BATCH_SIZE {
-                Crystalline::<SLOTS>::free_batch(batch.nodes);
+                Crystalline::<P>::free_batch(batch.nodes);
                 batch.nodes = ptr::null_mut();
                 batch.node_count = 0;
             }
             batch.node_count += 1;
-            Crystalline::<SLOTS>::traverse(batch, next);
+            Crystalline::<P>::traverse(batch, next);
         }
     }
 
@@ -183,7 +184,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         let mut last = curr;
 
         for slot in self.slots.iter() {
-            for i in 0..SLOTS {
+            for i in 0..P::SLOTS {
                 let first = slot.first[i].load(Ordering::Acquire);
                 if first == Node::INACTIVE {
                     continue;
@@ -207,7 +208,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
 
         'walk: while curr != last {
             let slot_first = &*(*curr).reservation.slot;
-            let slot_epoch = &*(*curr).reservation.slot.add(SLOTS).cast::<AtomicU64>();
+            let slot_epoch = &*(*curr).reservation.slot.add(P::SLOTS).cast::<AtomicU64>();
 
             let prev = slot_first.load(Ordering::Acquire);
 
@@ -242,20 +243,20 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
                 .reservation
                 .next
                 .store(ptr::null_mut(), Ordering::Release);
-            Crystalline::<SLOTS>::free_batch(&mut *refs);
+            Crystalline::<P>::free_batch(&mut *refs);
         }
 
         batch.first = ptr::null_mut();
         batch.counter = 0;
     }
 
-    fn update_epoch(&self, slot: &Slots<SLOTS>, mut current_epoch: u64, index: usize) -> u64 {
+    fn update_epoch(&self, slot: &Slots<P>, mut current_epoch: u64, index: usize) -> u64 {
         if !slot.first[index].load(Ordering::Acquire).is_null() {
             let first = slot.first[index].swap(Node::INACTIVE, Ordering::AcqRel);
             if first != Node::INACTIVE {
                 unsafe {
                     let batch = self.batches.get_or(Default::default).get();
-                    Crystalline::<SLOTS>::traverse_cache(&mut *batch, first)
+                    Crystalline::<P>::traverse_cache(&mut *batch, first)
                 }
             }
 
@@ -294,9 +295,22 @@ unsafe impl Send for Batch {}
 unsafe impl Sync for Batch {}
 
 #[repr(C)]
-struct Slots<const SLOTS: usize> {
-    first: [U64Padded<AtomicPtr<Node>>; SLOTS],
-    epoch: [AtomicU64; SLOTS],
+struct Slots<P: Protect> {
+    first: protect::AtomicNodes<P>,
+    epoch: protect::Epochs<P>,
+}
+
+pub const DEFAULT_FIRST_NODE: U64Padded<AtomicPtr<Node>> =
+    U64Padded::new(AtomicPtr::new(Node::INACTIVE));
+pub const DEFAULT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+impl<P: Protect> Default for Slots<P> {
+    fn default() -> Self {
+        Slots {
+            first: protect::AtomicNodes::<P>::default(),
+            epoch: protect::Epochs::<P>::default(),
+        }
+    }
 }
 
 utils::const_assert!(
@@ -307,18 +321,6 @@ utils::const_assert!(
     std::mem::size_of::<U64Padded<AtomicPtr<Node>>>() == std::mem::size_of::<AtomicU64>()
 );
 
-impl<const SLOTS: usize> Default for Slots<SLOTS> {
-    fn default() -> Self {
-        const ZERO: AtomicU64 = AtomicU64::new(0);
-        const INACTIVE: U64Padded<AtomicPtr<Node>> = U64Padded::new(AtomicPtr::new(Node::INACTIVE));
-
-        Slots {
-            first: [INACTIVE; SLOTS],
-            epoch: [ZERO; SLOTS],
-        }
-    }
-}
-
 pub struct Node {
     batch: BatchNode,
     reservation: ReservationNode,
@@ -328,7 +330,7 @@ pub struct Node {
 }
 
 impl Node {
-    const INACTIVE: *mut Node = -1_isize as usize as _;
+    pub(crate) const INACTIVE: *mut Node = -1_isize as usize as _;
 }
 
 union ReservationNode {

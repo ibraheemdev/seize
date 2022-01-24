@@ -1,14 +1,18 @@
+mod protect;
 mod raw;
 mod tls;
 mod utils;
 
 use std::marker::PhantomData;
 
-pub struct Crystalline<const SLOTS: usize> {
-    raw: raw::Crystalline<SLOTS>,
+pub use protect::{Protect, Slots};
+pub use utils::U64Padded;
+
+pub struct Crystalline<P: Protect> {
+    raw: raw::Crystalline<P>,
 }
 
-impl<const SLOTS: usize> Crystalline<SLOTS> {
+impl<P: Protect> Crystalline<P> {
     const DEFAULT_EPOCH_TICK: u64 = 110;
     const DEFAULT_RETIRE_TICK: usize = 120;
 
@@ -32,7 +36,7 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
         self
     }
 
-    pub fn guard(&self) -> Guard<'_, SLOTS> {
+    pub fn guard(&self) -> Guard<'_, P> {
         Guard {
             crystalline: self,
             _not_send: PhantomData,
@@ -51,28 +55,22 @@ impl<const SLOTS: usize> Crystalline<SLOTS> {
     }
 }
 
-pub struct Protect(pub usize);
-
-pub struct Guard<'a, const SLOTS: usize> {
-    crystalline: &'a Crystalline<SLOTS>,
+pub struct Guard<'a, P: Protect> {
+    crystalline: &'a Crystalline<P>,
     _not_send: PhantomData<*mut ()>,
 }
 
-impl<'g, const SLOTS: usize> Guard<'g, SLOTS> {
+impl<'g, P: Protect> Guard<'g, P> {
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
         self.crystalline.raw.retire(ptr, retire)
     }
 
-    pub fn protect<T>(
-        &self,
-        op: impl FnMut() -> *mut Linked<T>,
-        protect: Protect,
-    ) -> *mut Linked<T> {
-        self.crystalline.raw.protect(op, protect.0)
+    pub fn protect<T>(&self, op: impl FnMut() -> *mut Linked<T>, protect: P) -> *mut Linked<T> {
+        self.crystalline.raw.protect(op, protect.into())
     }
 }
 
-impl<const SLOTS: usize> Drop for Guard<'_, SLOTS> {
+impl<P: Protect> Drop for Guard<'_, P> {
     fn drop(&mut self) {
         unsafe { self.crystalline.raw.clear_all() }
     }

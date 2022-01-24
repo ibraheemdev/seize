@@ -1,10 +1,14 @@
-use crystalline::{retire, Crystalline, Protect};
+use crystalline::{retire, Crystalline};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Barrier};
 
 #[test]
 fn it_works() {
-    const PROTECT_ALL: Protect = Protect(0);
+    crystalline::protection! {
+        enum Protect {
+            All,
+        }
+    }
 
     static mut DROPPED: [bool; 2] = [false; 2];
 
@@ -16,15 +20,15 @@ fn it_works() {
         }
     }
 
-    let crystalline = Arc::new(Crystalline::<3>::new().retire_tick(1));
+    let crystalline = Arc::new(Crystalline::<Protect>::new().retire_frequency(1));
 
     let zero = AtomicPtr::new(crystalline.link_boxed(Foo(0)));
 
     let guard = crystalline.guard();
-    let value = guard.protect(|| zero.load(Ordering::Acquire), PROTECT_ALL);
-    unsafe { guard.retire(value.as_ptr(), retire::boxed::<Foo>) }
+    let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
+    unsafe { guard.retire(value, retire::boxed::<Foo>) }
 
-    println!("{}", unsafe { value.deref().0 });
+    println!("{}", unsafe { (*value).0 });
 
     let barrier = Arc::new(Barrier::new(2));
     let one = Arc::new(AtomicPtr::new(crystalline.link_boxed(Foo(1))));
@@ -36,8 +40,8 @@ fn it_works() {
 
         move || {
             let guard = crystalline.guard();
-            let value = guard.protect(|| foo.load(Ordering::Acquire), PROTECT_ALL);
-            println!("{}", unsafe { value.deref().0 });
+            let value = guard.protect(|| foo.load(Ordering::Acquire), Protect::All);
+            println!("{}", unsafe { (*value).0 });
 
             barrier.wait();
             drop(guard);
@@ -48,9 +52,9 @@ fn it_works() {
     barrier.wait(); // wait for thread to access value
 
     let guard = crystalline.guard();
-    let value = guard.protect(|| one.load(Ordering::Acquire), PROTECT_ALL);
-    println!("{}", unsafe { value.deref().0 });
-    unsafe { guard.retire(value.as_ptr(), retire::boxed::<Foo>) }
+    let value = guard.protect(|| one.load(Ordering::Acquire), Protect::All);
+    println!("{}", unsafe { (*value).0 });
+    unsafe { guard.retire(value, retire::boxed::<Foo>) }
 
     barrier.wait(); // wait for thread to drop guard
     h.join().unwrap();

@@ -247,7 +247,6 @@ mod tests {
         assert_eq!(Some(&0), tls.get());
         assert_eq!(0, *tls.get_or(|| create()));
         assert_eq!(Some(&0), tls.get());
-        assert_eq!(None, tls.get());
     }
 
     #[test]
