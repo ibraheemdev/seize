@@ -322,6 +322,7 @@ pub struct Node {
     drop: unsafe fn(Link),
 }
 
+#[repr(C)]
 union ReservationNode {
     // Before retiring: The epoch value when this node was created
     birth_epoch: u64,
@@ -331,6 +332,7 @@ union ReservationNode {
     slot: *const AtomicPtr<Node>,
 }
 
+#[repr(C)]
 union BatchNode {
     // REFS: reference counter
     ref_count: ManuallyDrop<AtomicUsize>,
