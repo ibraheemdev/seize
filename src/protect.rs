@@ -91,33 +91,45 @@ impl<const N: usize> Default for Array<*mut Node, N> {
 
 impl<const N: usize> Default for Array<AtomicU64, N> {
     fn default() -> Self {
-        Self(
-            std::iter::repeat_with(|| AtomicU64::new(0))
-                .take(N)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-        // pub const ZERO: AtomicU64 = AtomicU64::new(0);
+        #[cfg(loom)]
+        {
+            Self(
+                std::iter::repeat_with(|| AtomicU64::new(0))
+                    .take(N)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+        }
 
-        // Self([ZERO; N])
+        #[cfg(not(loom))]
+        {
+            pub const ZERO: AtomicU64 = AtomicU64::new(0);
+            Self([ZERO; N])
+        }
     }
 }
 
 impl<const N: usize> Default for Array<U64Padded<AtomicPtr<Node>>, N> {
     fn default() -> Self {
-        // pub const INACTIVE: U64Padded<AtomicPtr<Node>> =
-        //     U64Padded::new(AtomicPtr::new(Node::INACTIVE));
+        #[cfg(loom)]
+        {
+            Self(
+                std::iter::repeat_with(|| U64Padded::new(AtomicPtr::new(Node::INACTIVE)))
+                    .take(N)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap_or_else(|_| panic!()),
+            )
+        }
 
-        // Self([INACTIVE; N])
+        #[cfg(not(loom))]
+        {
+            pub const INACTIVE: U64Padded<AtomicPtr<Node>> =
+                U64Padded::new(AtomicPtr::new(Node::INACTIVE));
 
-        Self(
-            std::iter::repeat_with(|| U64Padded::new(AtomicPtr::new(Node::INACTIVE)))
-                .take(N)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap_or_else(|_| panic!()),
-        )
+            Self([INACTIVE; N])
+        }
     }
 }
 

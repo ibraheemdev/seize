@@ -19,10 +19,8 @@ mod sync {
 
     #[cfg(not(loom))]
     pub(crate) mod atomic {
-        #[cfg(target_pointer_width = "64")]
-        pub use core::sync::atomic::AtomicU64;
         pub(crate) use core::sync::atomic::{
-            fence, AtomicBool, AtomicIsize, AtomicPtr, AtomicUsize, Ordering,
+            fence, AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
         };
     }
 
