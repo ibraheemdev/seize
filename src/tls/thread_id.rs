@@ -6,6 +6,7 @@
 // copied, modified, or distributed except according to those terms.
 
 use once_cell::sync::Lazy;
+
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Mutex;
@@ -87,7 +88,11 @@ impl Drop for ThreadHolder {
     }
 }
 
+#[cfg(not(loom))]
 thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
+
+#[cfg(loom)]
+loom::thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
 
 /// Get the current thread.
 pub(crate) fn get() -> Thread {

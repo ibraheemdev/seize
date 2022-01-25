@@ -1,9 +1,9 @@
 use crate::raw::Node;
 use crate::utils::U64Padded;
 
+use crate::sync::atomic::{AtomicPtr, AtomicU64};
 use std::ops::{Index, IndexMut};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 pub unsafe trait Protect: Send + Sync {
     const SLOTS: usize;
@@ -91,18 +91,33 @@ impl<const N: usize> Default for Array<*mut Node, N> {
 
 impl<const N: usize> Default for Array<AtomicU64, N> {
     fn default() -> Self {
-        pub const ZERO: AtomicU64 = AtomicU64::new(0);
+        Self(
+            std::iter::repeat_with(|| AtomicU64::new(0))
+                .take(N)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        // pub const ZERO: AtomicU64 = AtomicU64::new(0);
 
-        Self([ZERO; N])
+        // Self([ZERO; N])
     }
 }
 
 impl<const N: usize> Default for Array<U64Padded<AtomicPtr<Node>>, N> {
     fn default() -> Self {
-        pub const INACTIVE: U64Padded<AtomicPtr<Node>> =
-            U64Padded::new(AtomicPtr::new(Node::INACTIVE));
+        // pub const INACTIVE: U64Padded<AtomicPtr<Node>> =
+        //     U64Padded::new(AtomicPtr::new(Node::INACTIVE));
 
-        Self([INACTIVE; N])
+        // Self([INACTIVE; N])
+
+        Self(
+            std::iter::repeat_with(|| U64Padded::new(AtomicPtr::new(Node::INACTIVE)))
+                .take(N)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap_or_else(|_| panic!()),
+        )
     }
 }
 

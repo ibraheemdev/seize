@@ -1,4 +1,6 @@
 use crate::protect::{self, Protect};
+
+use crate::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use crate::tls::ThreadLocal;
 use crate::utils::{self, CachePadded, U64Padded};
 use crate::{Link, Linked};
@@ -6,7 +8,6 @@ use crate::{Link, Linked};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 // Fast, lock-free, robust concurrent memory reclamation.
 //
@@ -64,7 +65,7 @@ impl<P: Protect> Collector<P> {
                 birth_epoch: self.epoch(),
             },
             batch: BatchNode {
-                ref_count: ManuallyDrop::new(AtomicUsize::default()),
+                ref_count: ManuallyDrop::new(TrackedAtomicUsize::default()),
             },
         }
     }
@@ -185,7 +186,8 @@ impl<P: Protect> Collector<P> {
             list = (*curr).reservation.next.load(Ordering::Acquire);
 
             let node = &mut *(*curr).batch_link;
-            if node.batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let x = node.batch.ref_count.fetch_sub(1, Ordering::AcqRel);
+            if x == 1 {
                 node.reservation.next.store(batch.list, Ordering::Release);
                 batch.list = node;
             }
@@ -255,7 +257,11 @@ impl<P: Protect> Collector<P> {
             curr = (*curr).batch.next;
         }
 
-        if (*refs).batch.ref_count.fetch_add(count, Ordering::AcqRel) + count == 0 {
+        let prev = (*refs).batch.ref_count.fetch_add(count, Ordering::AcqRel);
+
+        eprintln!("PREV REFS: {}", prev);
+
+        if prev + count == 0 {
             (*refs)
                 .reservation
                 .next
@@ -320,9 +326,26 @@ union ReservationNode {
     slot: *const AtomicPtr<Node>,
 }
 
+#[derive(Default)]
+struct TrackedAtomicUsize(AtomicUsize);
+
+impl TrackedAtomicUsize {
+    pub fn fetch_add(&self, val: usize, order: std::sync::atomic::Ordering) -> usize {
+        if val != 0 {
+            panic!("!!");
+        }
+
+        self.0.fetch_add(val, order)
+    }
+
+    pub fn fetch_sub(&self, _val: usize, _order: std::sync::atomic::Ordering) -> usize {
+        panic!("!!");
+    }
+}
+
 union BatchNode {
     // REFS: reference counter
-    ref_count: ManuallyDrop<AtomicUsize>,
+    ref_count: ManuallyDrop<TrackedAtomicUsize>,
     // SLOT: next node in the batch
     next: *mut Node,
 }
