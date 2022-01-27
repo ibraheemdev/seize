@@ -209,16 +209,6 @@ impl<P: Protect> Collector<P> {
         }
     }
 
-    pub fn eager_retire(&self) {
-        let batch = self.batches.get_or(Default::default).get();
-
-        unsafe {
-            if !(*batch).head.is_null() {
-                Collector::<P>::free_list((*batch).tail);
-            }
-        }
-    }
-
     // Attempt to retire nodes in this batch.
     unsafe fn try_retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");

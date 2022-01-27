@@ -103,8 +103,6 @@ fn two_threads() {
 
         drop(guard);
 
-        collector.eager_retire();
-
         assert_eq!(
             (
                 zero_dropped.load(Ordering::Acquire),

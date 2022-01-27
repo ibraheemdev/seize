@@ -30,10 +30,6 @@ impl<P: Protect> Collector<P> {
         self
     }
 
-    pub fn eager_retire(&self) {
-        self.raw.eager_retire();
-    }
-
     pub fn guard(&self) -> Guard<'_, P> {
         Guard {
             collector: self,
