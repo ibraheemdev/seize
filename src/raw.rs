@@ -310,6 +310,10 @@ impl<P: Protect> Collector<P> {
     unsafe fn free_list(mut list: *mut Node) {
         trace!("freeing reservation list");
 
+        if !list.is_null() {
+            (*list).batch.next = ptr::null_mut();
+        }
+
         while !list.is_null() {
             let mut start = (*list).batch_link;
             list = (*list).reservation.next.load(Ordering::Acquire);
