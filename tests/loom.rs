@@ -1,12 +1,12 @@
-#[cfg(loom)]
-use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+#![cfg(loom)]
 
 use seize::Collector;
-use std::sync::{Arc, Barrier};
+
+use loom::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
 
 #[test]
-#[cfg(loom)]
-fn it_works() {
+fn single_thread() {
     loom::model(|| {
         seize::protection! {
             enum Protect {
@@ -41,14 +41,13 @@ fn it_works() {
             }
         }
 
-        assert_eq!(dropped.load(std::sync::atomic::Ordering::Acquire), true);
+        assert_eq!(dropped.load(Ordering::Acquire), true);
     });
 }
 
 #[test]
-#[cfg(loom)]
-fn it_works2() {
-    loom::model(|| {
+fn two_threads() {
+    loom::model(move || {
         seize::protection! {
             enum Protect {
                 All,
@@ -65,54 +64,51 @@ fn it_works2() {
 
         let collector = Arc::new(Collector::new().batch_size(1));
 
-        let zero_dropped = Arc::new(AtomicBool::new(false));
         let one_dropped = Arc::new(AtomicBool::new(false));
+        let zero_dropped = Arc::new(AtomicBool::new(false));
 
-        let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
+        {
+            let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
+            let guard = collector.guard();
+            let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
+            unsafe { guard.seize(value, seize::boxed::<Foo>) }
+        }
 
-        let guard = collector.guard();
-        let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
-        unsafe { guard.seize(value, seize::boxed::<Foo>) }
+        let (tx, rx) = loom::sync::mpsc::channel();
 
-        println!("{}", unsafe { (*value).0 });
-
-        let barrier = Arc::new(Barrier::new(2));
         let one = Arc::new(AtomicPtr::new(
             collector.link_boxed(Foo(1, one_dropped.clone())),
         ));
 
         let h = loom::thread::spawn({
             let foo = one.clone();
-            let barrier = barrier.clone();
             let collector = collector.clone();
 
             move || {
                 let guard = collector.guard();
-                let value = guard.protect(|| foo.load(Ordering::Acquire), Protect::All);
-                println!("{}", unsafe { (*value).0 });
-
-                barrier.wait();
+                let _value = guard.protect(|| foo.load(Ordering::Acquire), Protect::All);
+                tx.send(()).unwrap();
                 drop(guard);
-                barrier.wait();
+                tx.send(()).unwrap();
             }
         });
 
-        barrier.wait(); // wait for thread to access value
-
+        let _ = rx.recv().unwrap(); // wait for thread to access value
         let guard = collector.guard();
         let value = guard.protect(|| one.load(Ordering::Acquire), Protect::All);
-        println!("{}", unsafe { (*value).0 });
         unsafe { guard.seize(value, seize::boxed::<Foo>) }
 
-        barrier.wait(); // wait for thread to drop guard
+        let _ = rx.recv().unwrap(); // wait for thread to drop guard
         h.join().unwrap();
 
         drop(guard);
 
+        collector.eager_retire();
+
         assert_eq!(
             (
-                zero_dropped.load(std::sync::atomic::Ordering::Acquire),
-                one_dropped.load(std::sync::atomic::Ordering::Acquire)
+                zero_dropped.load(Ordering::Acquire),
+                one_dropped.load(Ordering::Acquire)
             ),
             (true, true)
         );

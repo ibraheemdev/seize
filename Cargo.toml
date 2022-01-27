@@ -6,6 +6,11 @@ edition = "2021"
 [dependencies]
 num_cpus = "1.13.1"
 once_cell = "1.9.0"
+tracing = { version = "0.1.29", optional = true }
+
+[features]
+default = []
+log = ["tracing"]
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.5", features = ["checkpoint"] }

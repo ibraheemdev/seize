@@ -1,7 +1,7 @@
 use crate::protect::{self, Protect};
-
 use crate::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use crate::tls::ThreadLocal;
+use crate::tracing::*;
 use crate::utils::{self, CachePadded, U64Padded};
 use crate::{Link, Linked};
 
@@ -51,10 +51,12 @@ impl<P: Protect> Collector<P> {
         // SAFETY: node counts are only accessed by the current thread
         unsafe {
             *count += 1;
+            trace!("allocated new value, values: {}", *count);
 
             if *count % self.epoch_frequency == 0 {
                 // advance the global epoch
-                self.epoch.fetch_add(1, Ordering::AcqRel);
+                let _epoch = self.epoch.fetch_add(1, Ordering::AcqRel);
+                trace!("advancing global epoch to {}", _epoch + 1);
             }
         }
 
@@ -74,6 +76,8 @@ impl<P: Protect> Collector<P> {
     pub fn protect<T>(&self, mut load: impl FnMut() -> *mut T, index: usize) -> *mut T {
         let slot = self.slots.get_or(Default::default);
 
+        trace!("protecting slot {}", index);
+
         let mut prev_epoch = slot.epoch[index].load(Ordering::Acquire);
 
         loop {
@@ -83,6 +87,13 @@ impl<P: Protect> Collector<P> {
             if prev_epoch == current_epoch {
                 return ptr;
             } else {
+                trace!(
+                    "updating epoch for slot {} from {} to {}",
+                    index,
+                    prev_epoch,
+                    current_epoch
+                );
+
                 prev_epoch = self.update_epoch(&slot, current_epoch, index);
             }
         }
@@ -94,10 +105,8 @@ impl<P: Protect> Collector<P> {
             let first = slot.head[index].swap(Node::INACTIVE, Ordering::AcqRel);
 
             if first != Node::INACTIVE {
-                unsafe {
-                    let batch = self.batches.get_or(Default::default).get();
-                    Collector::<P>::clean_up(&mut *batch, first)
-                }
+                let batch = self.batches.get_or(Default::default).get();
+                unsafe { Collector::<P>::clean_up(first, &mut *batch) }
             }
 
             slot.head[index].store(ptr::null_mut(), Ordering::SeqCst);
@@ -109,7 +118,7 @@ impl<P: Protect> Collector<P> {
     }
 
     // Clean up the old reservation list
-    unsafe fn clean_up(batch: &mut Batch, next: *mut Node) {
+    unsafe fn clean_up(next: *mut Node, batch: &mut Batch) {
         if !next.is_null() {
             if batch.age == MAX_AGE {
                 Collector::<P>::free_list(batch.list);
@@ -124,7 +133,9 @@ impl<P: Protect> Collector<P> {
 
     // Defer deallocation of a value until no threads reference it
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, retire: unsafe fn(Link)) {
-        debug_assert!(!ptr.is_null(), "Attempted to retire null pointer");
+        debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
+
+        trace!("retiring pointer");
 
         let batch = &mut *self.batches.get_or(Default::default).get();
         let node = ptr::addr_of_mut!((*ptr).node);
@@ -154,13 +165,15 @@ impl<P: Protect> Collector<P> {
 
     // Clear all protected slots.
     pub unsafe fn clear_all(&self) {
+        trace!("clearing slots");
+
         let batch = &mut *self.batches.get_or(Default::default).get();
+        let slots = self.slots.get_or(Default::default);
 
         let mut list: protect::Nodes<P> = Default::default();
 
         for i in 0..P::SLOTS {
-            list[i] =
-                self.slots.get_or(Default::default).head[i].swap(Node::INACTIVE, Ordering::AcqRel);
+            list[i] = slots.head[i].swap(Node::INACTIVE, Ordering::AcqRel);
         }
 
         for i in 0..P::SLOTS {
@@ -177,6 +190,8 @@ impl<P: Protect> Collector<P> {
     // Traverse the reservation list, decrementing the refernce
     // count of each batch.
     unsafe fn traverse(mut list: *mut Node, batch: &mut Batch) {
+        trace!("traversing");
+
         loop {
             let curr = list;
             if curr.is_null() {
@@ -194,8 +209,20 @@ impl<P: Protect> Collector<P> {
         }
     }
 
+    pub fn eager_retire(&self) {
+        let batch = self.batches.get_or(Default::default).get();
+
+        unsafe {
+            if !(*batch).head.is_null() {
+                Collector::<P>::free_list((*batch).tail);
+            }
+        }
+    }
+
     // Attempt to retire nodes in this batch.
     unsafe fn try_retire(&self, batch: &mut Batch) {
+        trace!("attempting to retire batch");
+
         let mut curr = batch.head;
         let refs = batch.tail;
         let min_epoch = batch.min_epoch;
@@ -205,6 +232,7 @@ impl<P: Protect> Collector<P> {
         for slot in self.slots.iter() {
             for i in 0..P::SLOTS {
                 let first = slot.head[i].load(Ordering::Acquire);
+
                 if first == Node::INACTIVE {
                     continue;
                 }
@@ -226,18 +254,26 @@ impl<P: Protect> Collector<P> {
         let mut count = 0;
 
         'walk: while curr != last {
-            let slot_first = &*(*curr).reservation.slot;
-            let slot_epoch = &*(*curr).reservation.slot.add(P::SLOTS).cast::<AtomicU64>();
+            let slot_first = (*curr).reservation.slot;
+            let slot_epoch = (*curr).reservation.slot.add(P::SLOTS).cast::<AtomicU64>();
 
-            let prev = slot_first.load(Ordering::Acquire);
+            #[cfg(loom)]
+            {
+                // loom's AtomicUsize is not repr(transparent) over
+                // usize, so the 0 value of `reservation.slot` cannot be
+                // interpreted as a `reservation.next`.
+                (*curr).reservation.next = ManuallyDrop::new(AtomicPtr::new(ptr::null_mut()));
+            }
 
             loop {
+                let prev = (*slot_first).load(Ordering::Acquire);
+
                 if prev == Node::INACTIVE {
                     curr = (*curr).batch.next;
                     continue 'walk;
                 }
 
-                let epoch = slot_epoch.load(Ordering::Acquire);
+                let epoch = (*slot_epoch).load(Ordering::Acquire);
                 if epoch < min_epoch {
                     curr = (*curr).batch.next;
                     continue 'walk;
@@ -245,7 +281,7 @@ impl<P: Protect> Collector<P> {
 
                 (*curr).reservation.next.store(prev, Ordering::Relaxed);
 
-                if slot_first
+                if (*slot_first)
                     .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
@@ -263,14 +299,6 @@ impl<P: Protect> Collector<P> {
                 .next
                 .store(ptr::null_mut(), Ordering::Release);
 
-            #[cfg(loom)]
-            {
-                // loom's AtomicUsize is not repr(transparent) over
-                // usize, so the 0 value of `batch.ref_count` will not be
-                // interpreted as a null `batch.next`.
-                (*refs).batch.next = ptr::null_mut();
-            }
-
             Collector::<P>::free_list(&mut *refs);
         }
 
@@ -280,6 +308,8 @@ impl<P: Protect> Collector<P> {
 
     // Free the reservation list.
     unsafe fn free_list(mut list: *mut Node) {
+        trace!("freeing reservation list");
+
         while !list.is_null() {
             let mut start = (*list).batch_link;
             list = (*list).reservation.next.load(Ordering::Acquire);
@@ -355,7 +385,7 @@ impl Node {
 // Per-slot reservation lists.
 #[repr(C)]
 struct Slots<P: Protect> {
-    // The head node of the resevation list.
+    // The head node of the reservation list.
     head: protect::AtomicNodes<P>,
     // The epoch value when this slot was last accessed.
     epoch: protect::Epochs<P>,
@@ -380,13 +410,13 @@ struct Batch {
     size: usize,
     // Head of the reservation list
     list: *mut Node,
-    // The number of times the epoch was updated.
-    age: usize,
     // The minimum epoch across all nodes in this batch.
     min_epoch: u64,
+    // The number of times the epoch was updated.
+    age: usize,
 }
 
-// The maximum age of a batch before the reservation list is reset.
+// The maximum age of a batch before the reservation list is reclaimed.
 const MAX_AGE: usize = 12;
 
 impl Default for Batch {
@@ -395,8 +425,8 @@ impl Default for Batch {
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
             list: ptr::null_mut(),
-            age: 0,
             size: 0,
+            age: 0,
             min_epoch: 0,
         }
     }

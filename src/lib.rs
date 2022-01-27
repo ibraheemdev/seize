@@ -3,6 +3,7 @@ mod drop;
 mod protect;
 mod raw;
 mod tls;
+mod tracing;
 mod utils;
 
 pub use collector::{Collector, Guard, Link, Linked};
@@ -12,15 +13,13 @@ pub use protect::{Protect, Slots};
 mod sync {
     #[cfg(loom)]
     pub(crate) mod atomic {
-        pub(crate) use loom::sync::atomic::{
-            fence, AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
-        };
+        pub(crate) use loom::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
     }
 
     #[cfg(not(loom))]
     pub(crate) mod atomic {
         pub(crate) use core::sync::atomic::{
-            fence, AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
+            AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
         };
     }
 

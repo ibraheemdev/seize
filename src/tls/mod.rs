@@ -9,9 +9,10 @@ mod thread_id;
 use thread_id::Thread;
 
 use std::cell::UnsafeCell;
-use std::mem;
-use std::mem::MaybeUninit;
+use std::mem::{self, MaybeUninit};
 use std::ptr;
+
+// TODO: loom doesn't expose get_mut
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 

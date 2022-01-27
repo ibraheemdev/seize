@@ -5,12 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use once_cell::sync::Lazy;
-
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Mutex;
 use std::usize;
+
+use once_cell::sync::Lazy;
 
 /// Thread ID manager which allocates thread IDs. It attempts to aggressively
 /// reuse thread IDs where possible to avoid cases where a ThreadLocal grows
