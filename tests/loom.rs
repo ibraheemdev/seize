@@ -1,16 +1,15 @@
 #![cfg(loom)]
 
-use seize::Collector;
-
 use loom::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use seize::{reclaim, Collector};
 use std::sync::Arc;
 
 #[test]
 fn single_thread() {
     loom::model(|| {
-        seize::protection! {
-            enum Protect {
-                All,
+        seize::slot! {
+            enum Slot {
+                First,
             }
         }
 
@@ -31,13 +30,13 @@ fn single_thread() {
 
             {
                 let guard = collector.guard();
-                let _ = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
+                let _ = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
             }
 
             {
                 let guard = collector.guard();
-                let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
-                unsafe { guard.seize(value, seize::boxed::<Foo>) }
+                let value = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
+                unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
             }
         }
 
@@ -48,9 +47,9 @@ fn single_thread() {
 #[test]
 fn two_threads() {
     loom::model(move || {
-        seize::protection! {
-            enum Protect {
-                All,
+        seize::slot! {
+            enum Slot {
+                First,
             }
         }
 
@@ -70,8 +69,8 @@ fn two_threads() {
         {
             let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
             let guard = collector.guard();
-            let value = guard.protect(|| zero.load(Ordering::Acquire), Protect::All);
-            unsafe { guard.seize(value, seize::boxed::<Foo>) }
+            let value = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
+            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
         }
 
         let (tx, rx) = loom::sync::mpsc::channel();
@@ -86,7 +85,7 @@ fn two_threads() {
 
             move || {
                 let guard = collector.guard();
-                let _value = guard.protect(|| foo.load(Ordering::Acquire), Protect::All);
+                let _value = guard.protect(|| foo.load(Ordering::Acquire), Slot::First);
                 tx.send(()).unwrap();
                 drop(guard);
                 tx.send(()).unwrap();
@@ -95,8 +94,8 @@ fn two_threads() {
 
         let _ = rx.recv().unwrap(); // wait for thread to access value
         let guard = collector.guard();
-        let value = guard.protect(|| one.load(Ordering::Acquire), Protect::All);
-        unsafe { guard.seize(value, seize::boxed::<Foo>) }
+        let value = guard.protect(|| one.load(Ordering::Acquire), Slot::First);
+        unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
 
         let _ = rx.recv().unwrap(); // wait for thread to drop guard
         h.join().unwrap();
