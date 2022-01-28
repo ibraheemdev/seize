@@ -60,8 +60,7 @@ jobs:
           override: true
       - run: rustup component add miri
       - uses: actions-rs/cargo@v1
-        with:
-          command: miri test
+      - run: cargo miri test
           
   doc:
     name: Docs
