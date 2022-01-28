@@ -44,6 +44,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         env:
           RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 2
         with:
           command: test
           args: --test loom --release -- --nocapture
