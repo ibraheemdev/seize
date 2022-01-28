@@ -40,7 +40,7 @@ impl<S: crate::Slots> Collector<S> {
     }
 
     // Loads the current epoch value.
-    fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
 
@@ -314,6 +314,23 @@ impl<S: crate::Slots> Collector<S> {
 
                 if start.is_null() {
                     break;
+                }
+            }
+        }
+    }
+}
+
+impl<S: slots::Slots> Drop for Collector<S> {
+    fn drop(&mut self) {
+        for batch in self.batches.iter() {
+            unsafe {
+                let batch = batch.get();
+                if (*batch).size != 0 {
+                    (*(*batch).tail)
+                        .reservation
+                        .next
+                        .store(ptr::null_mut(), Ordering::Release);
+                    Collector::<S>::free_list((*batch).tail);
                 }
             }
         }
