@@ -46,7 +46,7 @@ jobs:
           RUSTFLAGS: --cfg loom
         with:
           command: test
-          args: --test loom -- --nocapture
+          args: --test loom --release -- --nocapture
 
   miri:
     name: Miri
