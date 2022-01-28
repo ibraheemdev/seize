@@ -5,6 +5,29 @@ use crate::utils::U64Padded;
 use std::ops::{Index, IndexMut};
 use std::ptr;
 
+/// Represents a single protection slot.
+///
+/// This is useful for data structures like
+/// linked lists that only have a single
+/// node to protect.
+///
+/// # Examples
+///
+/// ```rust
+/// // TODO
+/// ```
+pub struct SingleSlot;
+
+unsafe impl Slots for SingleSlot {
+    const SLOTS: usize = 1;
+
+    type Arrays = Arrays<1>;
+
+    fn as_index(self) -> usize {
+        0
+    }
+}
+
 /// A type representing protection slots in a collector.
 ///
 /// Use the [`slots`] macro to generate a type implementing this trait.
@@ -19,7 +42,7 @@ pub unsafe trait Slots: Send + Sync {
     /// [`const_evaluatable_unchecked`]: https://github.com/rust-lang/rust/issues/76200
     type Arrays: internal::Arrays;
 
-    /// Returns the slot that an instantce of his type represents.
+    /// Returns the slot that an instance of his type represents.
     fn as_index(self) -> usize;
 }
 
