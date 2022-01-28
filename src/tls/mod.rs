@@ -131,10 +131,7 @@ where
         unsafe { &*(&*value_ptr).as_ptr() }
     }
 
-    pub fn iter(&self) -> Iter<'_, T>
-    where
-        T: Sync,
-    {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             yielded: 0,
             bucket: 0,
@@ -172,7 +169,7 @@ where
 
 pub struct Iter<'a, T>
 where
-    T: Send + Sync,
+    T: Send,
 {
     thread_local: &'a ThreadLocal<T>,
     count: usize,
@@ -184,7 +181,7 @@ where
 
 impl<'a, T> Iterator for Iter<'a, T>
 where
-    T: Send + Sync,
+    T: Send,
 {
     type Item = &'a T;
 

@@ -143,6 +143,8 @@ impl<S: crate::Slots> Collector<S> {
         (*node).reclaim = reclaim;
 
         if batch.head.is_null() {
+            // REFS node: use the `batch.ref_count = 0`
+            // that it was initialized with
             batch.min_epoch = (*node).reservation.birth_epoch;
             batch.tail = node;
         } else {
@@ -151,7 +153,17 @@ impl<S: crate::Slots> Collector<S> {
             }
 
             (*node).batch_link = batch.tail;
+
+            // SLOT node: link it to the batch
             (*node).batch.next = batch.head;
+        }
+
+        cfg::loom! {
+            // loom's atomic pointer is not repr(transparent) over
+            // a regular pointer, so the value of `reservation.birth_epoch`
+            // cannot be interpreted as a pointer, even though we never read
+            // it (AtomicPtr::store would fail without this under loom)
+            (*node).reservation.next = ManuallyDrop::new(AtomicPtr::new(ptr::null_mut()))
         }
 
         batch.head = node;
@@ -213,6 +225,11 @@ impl<S: crate::Slots> Collector<S> {
     unsafe fn try_retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
+        // not entirely sure why this is needed, loom bug?
+        cfg::loom! {
+            loom::sync::atomic::fence(Ordering::Acquire)
+        }
+
         let mut curr = batch.head;
         let refs = batch.tail;
         let min_epoch = batch.min_epoch;
@@ -249,8 +266,8 @@ impl<S: crate::Slots> Collector<S> {
 
             cfg::loom! {
                 // loom's AtomicUsize is not repr(transparent) over
-                // usize, so the 0 value of `reservation.slot` cannot be
-                // interpreted as a `reservation.next`.
+                // usize, so the value of `reservation.slot` cannot be
+                // interpreted as a `reservation.next` pointer.
                 (*curr).reservation.next = ManuallyDrop::new(AtomicPtr::new(ptr::null_mut()))
             }
 
@@ -299,11 +316,14 @@ impl<S: crate::Slots> Collector<S> {
     unsafe fn free_list(mut list: *mut Node) {
         trace!("freeing reservation list");
 
-        if !list.is_null() {
-            (*list).batch.next = ptr::null_mut();
-        }
-
         while !list.is_null() {
+            cfg::loom! {
+                // loom's AtomicUsize is not repr(transparent) over
+                // usize, so the 0 value of `batch.ref_count`
+                // cannot be interpreted as a null pointer
+                (*list).batch.next = ptr::null_mut()
+            }
+
             let mut start = (*list).batch_link;
             list = (*list).reservation.next.load(Ordering::Acquire);
 
@@ -322,6 +342,8 @@ impl<S: crate::Slots> Collector<S> {
 
 impl<S: slots::Slots> Drop for Collector<S> {
     fn drop(&mut self) {
+        trace!("dropping collector");
+
         for batch in self.batches.iter() {
             unsafe {
                 let batch = batch.get();

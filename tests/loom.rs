@@ -130,7 +130,7 @@ fn treiber_stack() {
         pub fn new(batch_size: usize) -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new().batch_size(batch_size),
+                collector: Collector::new().batch_size(batch_size).epoch_frequency(2),
             }
         }
 
