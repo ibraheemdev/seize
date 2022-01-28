@@ -1,5 +1,6 @@
 use crate::{raw, Slots};
 
+use std::fmt;
 use std::marker::PhantomData;
 
 /// Fast and robust lock-free memory reclamation for Rust.
@@ -109,6 +110,16 @@ impl<S: Slots> Collector<S> {
     }
 }
 
+impl<S: Slots> fmt::Debug for Collector<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Collector")
+            .field("epoch", &self.raw.epoch())
+            .field("batch_size", &self.raw.batch_size)
+            .field("epoch_frequency", &self.raw.epoch_frequency)
+            .finish()
+    }
+}
+
 /// A guard that can protect loads of atomic pointers.
 ///
 /// A guard can be created from a [collector](Collector::guard).
@@ -164,6 +175,18 @@ impl Link {
 pub struct Linked<T> {
     pub(crate) node: raw::Node, // invariant: this field must come first
     value: T,
+}
+
+impl<T: fmt::Debug> fmt::Debug for Linked<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.value)
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Linked<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.value)
+    }
 }
 
 impl<T> std::ops::Deref for Linked<T> {
