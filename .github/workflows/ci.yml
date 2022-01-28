@@ -42,6 +42,8 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: --cfg loom
         with:
           command: test
           args: --features loom --test loom -- --nocapture
