@@ -14,3 +14,11 @@ loom = { version = "0.5", features = ["checkpoint"] }
 [features]
 default = []
 log = ["tracing"]
+
+[dev-dependencies]
+criterion = "0.3.5"
+flize = { git = "https://github.com/xacrimon/flize" }
+
+[[bench]]
+name = "bench"
+harness = false

@@ -5,7 +5,6 @@ use seize::{reclaim, Collector, Linked, SingleSlot};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 
 #[test]

@@ -1,12 +1,12 @@
 pub mod sync {
     #[cfg(loom)]
     pub(crate) mod atomic {
-        pub(crate) use loom::sync::atomic::{fence, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+        pub(crate) use loom::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
     }
 
     #[cfg(not(loom))]
     pub(crate) mod atomic {
-        pub(crate) use std::sync::atomic::{fence, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+        pub(crate) use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
     }
 
     #[cfg(loom)]
