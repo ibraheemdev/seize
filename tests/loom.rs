@@ -2,7 +2,11 @@
 
 use loom::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use seize::{reclaim, Collector, Linked, SingleSlot};
-use std::{mem::ManuallyDrop, ptr, sync::Arc};
+
+use std::mem::ManuallyDrop;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
 
 #[test]
 fn single_thread() {
@@ -30,12 +34,12 @@ fn single_thread() {
 
             {
                 let guard = collector.guard();
-                let _ = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
+                let _ = guard.protect(&zero, Slot::First);
             }
 
             {
                 let guard = collector.guard();
-                let value = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
+                let value = guard.protect(&zero, Slot::First);
                 unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
             }
         }
@@ -69,7 +73,7 @@ fn two_threads() {
         {
             let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
             let guard = collector.guard();
-            let value = guard.protect(|| zero.load(Ordering::Acquire), Slot::First);
+            let value = guard.protect(&zero, Slot::First);
             unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
         }
 
@@ -85,7 +89,7 @@ fn two_threads() {
 
             move || {
                 let guard = collector.guard();
-                let _value = guard.protect(|| foo.load(Ordering::Acquire), Slot::First);
+                let _value = guard.protect(&foo, Slot::First);
                 tx.send(()).unwrap();
                 drop(guard);
                 tx.send(()).unwrap();
@@ -94,7 +98,7 @@ fn two_threads() {
 
         let _ = rx.recv().unwrap(); // wait for thread to access value
         let guard = collector.guard();
-        let value = guard.protect(|| one.load(Ordering::Acquire), Slot::First);
+        let value = guard.protect(&one, Slot::First);
         unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
 
         let _ = rx.recv().unwrap(); // wait for thread to drop guard
@@ -143,7 +147,7 @@ fn treiber_stack() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(|| self.head.load(Ordering::Relaxed), SingleSlot);
+                let head = guard.protect(&self.head, SingleSlot);
                 unsafe { (*n).next.store(head, Ordering::Relaxed) }
 
                 if self
@@ -160,11 +164,11 @@ fn treiber_stack() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(|| self.head.load(Ordering::Acquire), SingleSlot);
+                let head = guard.protect(&self.head, SingleSlot);
 
                 match unsafe { head.as_ref() } {
                     Some(h) => {
-                        let next = guard.protect(|| h.next.load(Ordering::Relaxed), SingleSlot);
+                        let next = guard.protect(&h.next, SingleSlot);
 
                         if self
                             .head
@@ -184,9 +188,7 @@ fn treiber_stack() {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.guard();
-            guard
-                .protect(|| self.head.load(Ordering::Acquire), SingleSlot)
-                .is_null()
+            guard.protect(&self.head, SingleSlot).is_null()
         }
     }
 
