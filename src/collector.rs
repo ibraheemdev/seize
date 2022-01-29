@@ -1,5 +1,6 @@
 use crate::{raw, Slots};
 
+use crate::cfg::sync::atomic::{AtomicPtr, Ordering};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -113,7 +114,7 @@ impl<S: Slots> Collector<S> {
 impl<S: Slots> fmt::Debug for Collector<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Collector")
-            .field("epoch", &self.raw.epoch())
+            .field("epoch", &self.raw.epoch.load(Ordering::Acquire))
             .field("batch_size", &self.raw.batch_size)
             .field("epoch_frequency", &self.raw.epoch_frequency)
             .finish()
@@ -133,8 +134,8 @@ impl<S: Slots> Guard<'_, S> {
     /// Protect the load of an atomic pointer.
     ///
     /// See the [usage guide](crate#guide) for details.
-    pub fn protect<T>(&self, op: impl FnMut() -> *mut Linked<T>, protection: S) -> *mut Linked<T> {
-        self.collector.raw.protect(op, protection.as_index())
+    pub fn protect<T>(&self, ptr: &AtomicPtr<Linked<T>>, protection: S) -> *mut Linked<T> {
+        self.collector.raw.protect(ptr, protection.as_index())
     }
 }
 
