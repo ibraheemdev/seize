@@ -42,9 +42,12 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 2
         with:
           command: test
-          args: --features loom --test loom -- --nocapture
+          args: --test loom --release -- --nocapture
 
   miri:
     name: Miri
@@ -54,12 +57,11 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: nightly-2022-01-12
           override: true
       - run: rustup component add miri
       - uses: actions-rs/cargo@v1
-        with:
-          command: miri test
+      - run: cargo miri test
           
   doc:
     name: Docs
