@@ -62,6 +62,8 @@ jobs:
       - run: rustup component add miri
       - uses: actions-rs/cargo@v1
       - run: cargo miri test
+        env:
+          MIRIFLAGS: "-Zmiri-tag-raw-pointers -Zmiri-disable-isolation"
           
   doc:
     name: Docs
