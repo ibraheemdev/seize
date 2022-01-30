@@ -13,14 +13,13 @@ use std::mem::{self, MaybeUninit};
 use std::ptr;
 
 // TODO: loom doesn't expose get_mut
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
-    count: AtomicUsize,
     lock: Mutex<()>,
 }
 
@@ -65,7 +64,6 @@ where
             // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
             // representation as a sequence of their inner type.
             buckets: unsafe { mem::transmute(buckets) },
-            count: AtomicUsize::new(0),
             lock: Mutex::new(()),
         }
     }
@@ -133,12 +131,10 @@ where
 
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
-            yielded: 0,
             bucket: 0,
             bucket_size: 1,
             index: 0,
             thread_local: self,
-            count: self.count.load(Ordering::Acquire),
         }
     }
 }
@@ -172,8 +168,6 @@ where
     T: Send,
 {
     thread_local: &'a ThreadLocal<T>,
-    count: usize,
-    yielded: usize,
     bucket: usize,
     bucket_size: usize,
     index: usize,
@@ -186,11 +180,17 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.count == self.yielded {
-            return None;
-        }
-
-        loop {
+        // We have to check all the buckets here
+        // because we reuse thread IDs. Keeping track
+        // of the number of values and only yielding
+        // that many here wouldn't work, because a new
+        // thread could join and be inserted into a middle
+        // bucket, and we would yield that instead of an
+        // active thread that actually needs to participate
+        // in reference counting. Yielding extra values is
+        // fine, but not yielding all currently active
+        // threads is not.
+        while self.bucket < BUCKETS {
             let bucket = unsafe { self.thread_local.buckets.get_unchecked(self.bucket) };
             let bucket = bucket.load(Ordering::Acquire);
 
@@ -199,7 +199,6 @@ where
                     let entry = unsafe { &*bucket.add(self.index) };
                     self.index += 1;
                     if entry.present.load(Ordering::Acquire) {
-                        self.yielded += 1;
                         return Some(unsafe { &*(&*entry.value.get()).as_ptr() });
                     }
                 }
@@ -212,6 +211,8 @@ where
             self.bucket += 1;
             self.index = 0;
         }
+
+        None
     }
 }
 

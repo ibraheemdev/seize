@@ -13,7 +13,7 @@ const THREADS: usize = 30;
 const ITEMS: usize = 300;
 
 #[cfg(not(miri))]
-const THREADS: usize = 300;
+const THREADS: usize = 60;
 
 #[cfg(not(miri))]
 const ITEMS: usize = 30_000;
@@ -36,7 +36,7 @@ fn stress() {
         pub fn new(batch_size: usize) -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new().batch_size(batch_size).epoch_frequency(10),
+                collector: Collector::new().batch_size(batch_size),
             }
         }
 
@@ -115,7 +115,7 @@ fn stress() {
         })
         .collect::<Vec<_>>();
 
-    for i in 0..THREADS {
+    for i in 0..ITEMS {
         stack.push(i);
         assert!(stack.pop().is_some());
     }
