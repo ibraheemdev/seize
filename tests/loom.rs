@@ -1,7 +1,7 @@
 #![cfg(loom)]
 
-use loom::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use seize::{reclaim, Collector, Linked, SingleSlot};
+use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use seize::{reclaim, Collector, Linked};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -10,52 +10,40 @@ use std::sync::Arc;
 #[test]
 fn single_thread() {
     loom::model(|| {
-        seize::slots! {
-            enum Slot {
-                First,
-            }
-        }
-
-        struct Foo(usize, Arc<AtomicBool>);
+        struct Foo(usize, Arc<AtomicUsize>);
 
         impl Drop for Foo {
             fn drop(&mut self) {
-                self.1.store(true, Ordering::Release);
+                self.1.fetch_add(1, Ordering::Release);
             }
         }
 
-        let collector = Arc::new(Collector::new().batch_size(1));
+        let collector = Arc::new(Collector::new().batch_size(2));
 
-        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicUsize::new(0));
 
-        {
+        for _ in 0..22 {
             let zero = AtomicPtr::new(collector.link_boxed(Foo(0, dropped.clone())));
 
             {
                 let guard = collector.guard();
-                let _ = guard.protect(&zero, Slot::First);
+                let _ = guard.protect(&zero);
             }
 
             {
                 let guard = collector.guard();
-                let value = guard.protect(&zero, Slot::First);
+                let value = guard.protect(&zero);
                 unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
             }
         }
 
-        assert_eq!(dropped.load(Ordering::Acquire), true);
+        assert_eq!(dropped.load(Ordering::Acquire), 22);
     });
 }
 
 #[test]
 fn two_threads() {
     loom::model(move || {
-        seize::slots! {
-            enum Slot {
-                First,
-            }
-        }
-
         struct Foo(usize, Arc<AtomicBool>);
 
         impl Drop for Foo {
@@ -64,17 +52,10 @@ fn two_threads() {
             }
         }
 
-        let collector = Arc::new(Collector::new().batch_size(1));
+        let collector = Arc::new(Collector::new().batch_size(3));
 
         let one_dropped = Arc::new(AtomicBool::new(false));
         let zero_dropped = Arc::new(AtomicBool::new(false));
-
-        {
-            let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
-            let guard = collector.guard();
-            let value = guard.protect(&zero, Slot::First);
-            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
-        }
 
         let (tx, rx) = loom::sync::mpsc::channel();
 
@@ -88,16 +69,23 @@ fn two_threads() {
 
             move || {
                 let guard = collector.guard();
-                let _value = guard.protect(&foo, Slot::First);
+                let _value = guard.protect(&foo);
                 tx.send(()).unwrap();
                 drop(guard);
                 tx.send(()).unwrap();
             }
         });
 
+        for _ in 0..2 {
+            let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
+            let guard = collector.guard();
+            let value = guard.protect(&zero);
+            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+        }
+
         let _ = rx.recv().unwrap(); // wait for thread to access value
         let guard = collector.guard();
-        let value = guard.protect(&one, Slot::First);
+        let value = guard.protect(&one);
         unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
 
         let _ = rx.recv().unwrap(); // wait for thread to drop guard
@@ -120,7 +108,7 @@ fn treiber_stack() {
     #[derive(Debug)]
     pub struct TreiberStack<T> {
         head: AtomicPtr<Linked<Node<T>>>,
-        collector: Collector<SingleSlot>,
+        collector: Collector,
     }
 
     #[derive(Debug)]
@@ -146,7 +134,7 @@ fn treiber_stack() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, SingleSlot);
+                let head = guard.protect(&self.head);
                 unsafe { (*n).next.store(head, Ordering::Relaxed) }
 
                 if self
@@ -163,11 +151,11 @@ fn treiber_stack() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, SingleSlot);
+                let head = guard.protect(&self.head);
 
                 match unsafe { head.as_ref() } {
                     Some(h) => {
-                        let next = guard.protect(&h.next, SingleSlot);
+                        let next = guard.protect(&h.next);
 
                         if self
                             .head
@@ -187,7 +175,7 @@ fn treiber_stack() {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.guard();
-            guard.protect(&self.head, SingleSlot).is_null()
+            guard.protect(&self.head).is_null()
         }
     }
 

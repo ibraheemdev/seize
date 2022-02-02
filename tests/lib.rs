@@ -1,4 +1,4 @@
-use seize::{reclaim, Collector, Linked, SingleSlot};
+use seize::{reclaim, Collector, Linked};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -7,23 +7,25 @@ use std::sync::Arc;
 use std::thread;
 
 #[cfg(miri)]
-const THREADS: usize = 30;
-
-#[cfg(miri)]
-const ITEMS: usize = 300;
-
-#[cfg(not(miri))]
-const THREADS: usize = 60;
+mod cfg {
+    pub const THREADS: usize = 4;
+    pub const ITEMS: usize = 200;
+    pub const ITER: usize = 2;
+}
 
 #[cfg(not(miri))]
-const ITEMS: usize = 30_000;
+mod cfg {
+    pub const THREADS: usize = 32;
+    pub const ITEMS: usize = 10_000;
+    pub const ITER: usize = 100;
+}
 
 #[test]
 fn stress() {
     #[derive(Debug)]
     pub struct TreiberStack<T> {
         head: AtomicPtr<Linked<Node<T>>>,
-        collector: Collector<SingleSlot>,
+        collector: Collector,
     }
 
     #[derive(Debug)]
@@ -49,12 +51,12 @@ fn stress() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, SingleSlot);
-                unsafe { (*n).next.store(head, Ordering::Relaxed) }
+                let head = guard.protect(&self.head);
+                unsafe { (*n).next.store(head, Ordering::SeqCst) }
 
                 if self
                     .head
-                    .compare_exchange(head, n, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange(head, n, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
                     break;
@@ -66,15 +68,15 @@ fn stress() {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, SingleSlot);
+                let head = guard.protect(&self.head);
 
                 match unsafe { head.as_ref() } {
                     Some(h) => {
-                        let next = guard.protect(&h.next, SingleSlot);
+                        let next = guard.protect(&h.next);
 
                         if self
                             .head
-                            .compare_exchange(head, next, Ordering::Relaxed, Ordering::Relaxed)
+                            .compare_exchange(head, next, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                         {
                             unsafe {
@@ -91,7 +93,7 @@ fn stress() {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.guard();
-            guard.protect(&self.head, SingleSlot).is_null()
+            guard.protect(&self.head).is_null()
         }
     }
 
@@ -101,29 +103,31 @@ fn stress() {
         }
     }
 
-    let stack = Arc::new(TreiberStack::new(33));
+    for _ in 0..cfg::ITER {
+        let stack = Arc::new(TreiberStack::new(33));
 
-    let handles = (0..THREADS)
-        .map(|_| {
-            let stack = stack.clone();
-            thread::spawn(move || {
-                for i in 0..ITEMS {
-                    stack.push(i);
-                    assert!(stack.pop().is_some());
-                }
+        let handles = (0..cfg::THREADS)
+            .map(|_| {
+                let stack = stack.clone();
+                thread::spawn(move || {
+                    for i in 0..cfg::ITEMS {
+                        stack.push(i);
+                        stack.pop();
+                    }
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
 
-    for i in 0..ITEMS {
-        stack.push(i);
-        assert!(stack.pop().is_some());
+        for i in 0..cfg::ITEMS {
+            stack.push(i);
+            stack.pop();
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(stack.pop().is_none());
+        assert!(stack.is_empty());
     }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    assert!(stack.pop().is_none());
-    assert!(stack.is_empty());
 }

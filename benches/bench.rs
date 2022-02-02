@@ -74,17 +74,10 @@ mod seize_stack {
     use std::ptr;
     use std::sync::atomic::{AtomicPtr, Ordering};
 
-    seize::slots! {
-        enum Slot {
-            Head,
-            Next
-        }
-    }
-
     #[derive(Debug)]
     pub struct TreiberStack<T> {
         head: AtomicPtr<Linked<Node<T>>>,
-        collector: Collector<Slot>,
+        collector: Collector,
     }
 
     #[derive(Debug)]
@@ -110,7 +103,7 @@ mod seize_stack {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, Slot::Head);
+                let head = guard.protect(&self.head);
                 unsafe { (*n).next.store(head, Ordering::Relaxed) }
 
                 if self
@@ -127,11 +120,11 @@ mod seize_stack {
             let guard = self.collector.guard();
 
             loop {
-                let head = guard.protect(&self.head, Slot::Head);
+                let head = guard.protect(&self.head);
 
                 match unsafe { head.as_ref() } {
                     Some(h) => {
-                        let next = guard.protect(&h.next, Slot::Next);
+                        let next = guard.protect(&h.next);
 
                         if self
                             .head
@@ -152,7 +145,7 @@ mod seize_stack {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.guard();
-            guard.protect(&self.head, Slot::Head).is_null()
+            guard.protect(&self.head).is_null()
         }
     }
 

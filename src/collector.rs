@@ -1,4 +1,4 @@
-use crate::{raw, Slots};
+use crate::raw;
 
 use crate::cfg::sync::atomic::{AtomicPtr, Ordering};
 use std::fmt;
@@ -7,11 +7,11 @@ use std::marker::PhantomData;
 /// Fast and robust lock-free memory reclamation for Rust.
 ///
 /// See the [guide](crate#guide) for usage details.
-pub struct Collector<S: Slots> {
-    raw: raw::Collector<S>,
+pub struct Collector {
+    raw: raw::Collector,
 }
 
-impl<S: Slots> Collector<S> {
+impl Collector {
     const DEFAULT_EPOCH_TICK: u64 = 110;
     const DEFAULT_RETIRE_TICK: usize = 120;
 
@@ -69,7 +69,9 @@ impl<S: Slots> Collector<S> {
     /// Returns a guard that can protect loads of atomic pointers.
     ///
     /// See the [usage guide](crate#guide) for details.
-    pub fn guard(&self) -> Guard<'_, S> {
+    pub fn guard(&self) -> Guard<'_> {
+        self.raw.enter();
+
         Guard {
             collector: self,
             _not_send: PhantomData,
@@ -111,7 +113,7 @@ impl<S: Slots> Collector<S> {
     }
 }
 
-impl<S: Slots> fmt::Debug for Collector<S> {
+impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Collector")
             .field("epoch", &self.raw.epoch.load(Ordering::Acquire))
@@ -125,23 +127,23 @@ impl<S: Slots> fmt::Debug for Collector<S> {
 ///
 /// A guard can be created from a [collector](Collector::guard).
 /// See the [usage guide](crate#guide) for details.
-pub struct Guard<'a, S: Slots> {
-    collector: &'a Collector<S>,
+pub struct Guard<'a> {
+    collector: &'a Collector,
     _not_send: PhantomData<*mut ()>,
 }
 
-impl<S: Slots> Guard<'_, S> {
+impl Guard<'_> {
     /// Protect the load of an atomic pointer.
     ///
     /// See the [usage guide](crate#guide) for details.
-    pub fn protect<T>(&self, ptr: &AtomicPtr<Linked<T>>, protection: S) -> *mut Linked<T> {
-        self.collector.raw.protect(ptr, protection.as_index())
+    pub fn protect<T>(&self, ptr: &AtomicPtr<Linked<T>>) -> *mut Linked<T> {
+        self.collector.raw.protect(ptr)
     }
 }
 
-impl<S: Slots> Drop for Guard<'_, S> {
+impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        unsafe { self.collector.raw.clear_all() }
+        self.collector.raw.leave()
     }
 }
 
