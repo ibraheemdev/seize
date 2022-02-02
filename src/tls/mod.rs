@@ -45,7 +45,7 @@ where
     pub fn with_capacity(capacity: usize) -> ThreadLocal<T> {
         let allocated_buckets = capacity
             .checked_sub(1)
-            .map(|c| usize::from(usize::BITS as usize) - (c.leading_zeros() as usize) + 1)
+            .map(|c| (usize::BITS as usize) - (c.leading_zeros() as usize) + 1)
             .unwrap_or(0);
 
         let mut buckets = [ptr::null_mut(); BUCKETS];
@@ -236,6 +236,7 @@ fn allocate_bucket<T>(size: usize) -> *mut Entry<T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure)]
 mod tests {
     use super::ThreadLocal;
     use std::cell::RefCell;

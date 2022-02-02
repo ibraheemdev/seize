@@ -108,8 +108,21 @@ impl Collector {
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
     ///
     /// See the [usage guide](crate#guide) for details.
+    ///
+    /// # Safety
+    ///
+    /// The provided `reclaim` function must be appropriate for the provided pointer.
+    ///
+    /// Unlike memory reclamation algorithms like EBR, a retired pointer may be reclaimed
+    /// immediately by the current thread, so accessing it is **undefined behavior**.
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         self.raw.retire(ptr, reclaim)
+    }
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -61,7 +61,7 @@ pub(crate) struct Thread {
 
 impl Thread {
     fn new(id: usize) -> Thread {
-        let bucket = usize::from(usize::BITS as usize) - id.leading_zeros() as usize;
+        let bucket = (usize::BITS as usize) - id.leading_zeros() as usize;
         let bucket_size = 1 << bucket.saturating_sub(1);
         let index = if id != 0 { id ^ bucket_size } else { 0 };
 

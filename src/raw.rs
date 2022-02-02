@@ -257,7 +257,6 @@ impl Collector {
             == 0
         {
             Collector::free_list(batch.tail);
-            //batch.tail = ptr::null_mut();
         }
 
         batch.head = ptr::null_mut();
