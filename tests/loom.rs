@@ -8,6 +8,7 @@ use std::ptr;
 use std::sync::Arc;
 
 #[test]
+#[serial_test::serial]
 fn single_thread() {
     loom::model(|| {
         struct Foo(usize, Arc<AtomicUsize>);
@@ -42,6 +43,7 @@ fn single_thread() {
 }
 
 #[test]
+#[serial_test::serial]
 fn two_threads() {
     loom::model(move || {
         struct Foo(usize, Arc<AtomicBool>);
@@ -104,6 +106,7 @@ fn two_threads() {
 }
 
 #[test]
+#[serial_test::serial]
 fn treiber_stack() {
     #[derive(Debug)]
     pub struct TreiberStack<T> {

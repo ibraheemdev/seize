@@ -18,6 +18,7 @@ log = ["tracing"]
 [dev-dependencies]
 criterion = "0.3.5"
 flize = { git = "https://github.com/xacrimon/flize" }
+serial_test = "0.5.1"
 
 [[bench]]
 name = "bench"
