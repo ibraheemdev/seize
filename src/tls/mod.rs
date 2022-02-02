@@ -14,13 +14,11 @@ use std::ptr;
 
 // TODO: loom doesn't expose get_mut
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::Mutex;
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
-    lock: Mutex<()>,
 }
 
 struct Entry<T> {
@@ -64,7 +62,6 @@ where
             // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
             // representation as a sequence of their inner type.
             buckets: unsafe { mem::transmute(buckets) },
-            lock: Mutex::new(()),
         }
     }
 
@@ -101,30 +98,41 @@ where
 
     #[cold]
     fn insert(&self, thread: Thread, data: T) -> &T {
-        // Lock the Mutex to ensure only a single thread is allocating buckets at once
-        let _guard = self.lock.lock().unwrap();
+        let bucket = unsafe { self.buckets.get_unchecked(thread.bucket) };
 
-        let bucket_atomic_ptr = unsafe { self.buckets.get_unchecked(thread.bucket) };
+        let bucket_ptr: *const _ = bucket.load(Ordering::Acquire);
 
-        let bucket_ptr: *const _ = bucket_atomic_ptr.load(Ordering::Acquire);
+        // If the bucket doesn't already exist, we need to allocate it
         let bucket_ptr = if bucket_ptr.is_null() {
-            // Allocate a new bucket
-            let bucket_ptr = allocate_bucket(thread.bucket_size);
-            bucket_atomic_ptr.store(bucket_ptr, Ordering::Release);
-            bucket_ptr
+            let new_bucket = allocate_bucket(thread.bucket_size);
+
+            match bucket.compare_exchange(
+                ptr::null_mut(),
+                new_bucket,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => new_bucket,
+                // If the bucket value changed (from null), that means
+                // another thread stored a new bucket before we could,
+                // and we can free our bucket and use that one instead
+                Err(bucket_ptr) => {
+                    unsafe {
+                        let _ = Box::from_raw(new_bucket);
+                    }
+
+                    bucket_ptr
+                }
+            }
         } else {
             bucket_ptr
         };
-
-        drop(_guard);
 
         // Insert the new element into the bucket
         let entry = unsafe { &*bucket_ptr.add(thread.index) };
         let value_ptr = entry.value.get();
         unsafe { value_ptr.write(MaybeUninit::new(data)) };
         entry.present.store(true, Ordering::Release);
-
-        self.count.fetch_add(1, Ordering::Release);
 
         unsafe { &*(&*value_ptr).as_ptr() }
     }
