@@ -48,14 +48,3 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
         &mut self.value
     }
 }
-
-macro_rules! const_assert {
-    ($x:expr $(,)?) => {
-        const _: [(); 0 - !{
-            const ASSERT: bool = $x;
-            ASSERT
-        } as usize] = [];
-    };
-}
-
-pub(crate) use const_assert;

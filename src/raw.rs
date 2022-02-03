@@ -1,5 +1,4 @@
-use crate::cfg::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use crate::cfg::{self, trace};
+use crate::cfg::trace;
 use crate::tls::ThreadLocal;
 use crate::utils::CachePadded;
 use crate::{Link, Linked};
@@ -7,6 +6,7 @@ use crate::{Link, Linked};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 // Fast, lock-free, robust concurrent memory reclamation.
 //
@@ -73,12 +73,6 @@ impl Collector {
 
     // Mark the current thread as active.
     pub fn enter(&self) {
-        // TODO: this shouldn't be needed, and is probably a loom
-        // bug. putting fences in the correct places (where we
-        // have a store-load fence that loom doesn't recognize)
-        // does not work
-        cfg::loom! { loom::sync::atomic::fence(Ordering::SeqCst) }
-
         let reservation = self.reservations.get_or(Default::default);
         reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
     }
@@ -138,14 +132,6 @@ impl Collector {
             (*node).batch.next = batch.head;
         }
 
-        cfg::loom! {
-            // loom's atomic pointer is not repr(transparent) over
-            // a regular pointer, so the value of `reservation.birth_epoch`
-            // cannot be interpreted as a pointer, even though we never read
-            // it (AtomicPtr::store would fail without this under loom)
-            (*node).reservation.next = ManuallyDrop::new(AtomicPtr::new(ptr::null_mut()))
-        }
-
         batch.head = node;
         batch.size += 1;
 
@@ -191,8 +177,6 @@ impl Collector {
     unsafe fn try_retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
-        cfg::loom! { loom::sync::atomic::fence(Ordering::SeqCst) }
-
         let mut last = batch.head;
         for reservation in self.reservations.iter() {
             if reservation.head.load(Ordering::Acquire) == Node::INACTIVE {
@@ -216,13 +200,6 @@ impl Collector {
 
         while curr != last {
             let list = (*curr).reservation.head;
-
-            cfg::loom! {
-                // loom's AtomicUsize is not repr(transparent) over
-                // usize, so the value of `reservation.slot` cannot be
-                // interpreted as a `reservation.next` pointer.
-                (*curr).reservation.next = ManuallyDrop::new(AtomicPtr::new(ptr::null_mut()))
-            }
 
             loop {
                 let prev = (*list).load(Ordering::Acquire);
@@ -261,13 +238,6 @@ impl Collector {
     // Free a reservation list.
     unsafe fn free_list(list: *mut Node) {
         trace!("freeing reservation list");
-
-        cfg::loom! {
-            // loom's AtomicUsize is not repr(transparent) over
-            // usize, so the 0 value of `batch.ref_count`
-            // cannot be interpreted as a null pointer
-            (*list).batch.next = ptr::null_mut()
-        }
 
         let mut list = (*list).batch_link;
 

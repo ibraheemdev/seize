@@ -1,8 +1,8 @@
 use crate::raw;
 
-use crate::cfg::sync::atomic::{AtomicPtr, Ordering};
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Fast and robust lock-free memory reclamation for Rust.
 ///
