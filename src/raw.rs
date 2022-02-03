@@ -292,6 +292,8 @@ impl Drop for Collector {
                 let batch = &mut *batch.get();
                 if !batch.head.is_null() {
                     (*batch.tail).batch_link = batch.head;
+                    // the reference count might not be 0 (null)
+                    (*batch.tail).batch.next = ptr::null_mut();
                     Collector::free_list(batch.tail);
                 }
             }
