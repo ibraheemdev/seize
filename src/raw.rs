@@ -1,7 +1,7 @@
 use crate::cfg::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use crate::cfg::{self, trace};
 use crate::tls::ThreadLocal;
-use crate::utils::{self, CachePadded, U64Padded};
+use crate::utils::CachePadded;
 use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
@@ -207,7 +207,7 @@ impl Collector {
                 return;
             }
 
-            (*last).reservation.list = &**reservation as _;
+            (*last).reservation.head = &reservation.head;
             last = (*last).batch.next;
         }
 
@@ -215,7 +215,7 @@ impl Collector {
         let mut curr = batch.head;
 
         while curr != last {
-            let reservation = (*curr).reservation.list;
+            let list = (*curr).reservation.head;
 
             cfg::loom! {
                 // loom's AtomicUsize is not repr(transparent) over
@@ -225,19 +225,14 @@ impl Collector {
             }
 
             loop {
-                let prev = (*reservation).head.load(Ordering::Acquire);
+                let prev = (*list).load(Ordering::Acquire);
                 if prev == Node::INACTIVE {
-                    break;
-                }
-
-                if (*reservation).epoch.load(Ordering::Acquire) < batch.min_epoch {
                     break;
                 }
 
                 (*curr).reservation.next.store(prev, Ordering::Relaxed);
 
-                if (*reservation)
-                    .head
+                if (*list)
                     .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
@@ -325,11 +320,10 @@ pub struct Node {
 union ReservationNode {
     // Before retiring: The epoch value when this node was created
     birth_epoch: u64,
-    // SLOT (while retiring): next node in the reservation list
+    // SLOT (after retiring): next node in the reservation list
     next: ManuallyDrop<AtomicPtr<Node>>,
-    // SLOT (after retiring): the reservation list of the thread
-    // this node was retired on
-    list: *const Reservation,
+    // SLOT (while retiring): temporary location for an active reservation list
+    head: *const AtomicPtr<Node>,
 }
 
 #[repr(C)]
@@ -356,24 +350,16 @@ impl Node {
 #[repr(C)]
 struct Reservation {
     // The head of the list.
-    head: U64Padded<AtomicPtr<Node>>,
+    head: AtomicPtr<Node>,
     // The epoch value when the thread associated with this list
     // ast accessed a pointer.
     epoch: AtomicU64,
 }
 
-utils::const_assert!(
-    // We need the size of the elements of `reservation.first` to be equal
-    // `reservation.epoch`, in order to jump between the two from the pointer
-    // stored in `node.reservation.slot`. That way `ReservationNode` stays 64
-    // bits.
-    std::mem::size_of::<U64Padded<AtomicPtr<Node>>>() == std::mem::size_of::<AtomicU64>()
-);
-
 impl Default for Reservation {
     fn default() -> Self {
         Reservation {
-            head: U64Padded::new(AtomicPtr::new(Node::INACTIVE)),
+            head: AtomicPtr::new(Node::INACTIVE),
             epoch: AtomicU64::new(0),
         }
     }
