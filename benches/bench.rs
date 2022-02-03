@@ -4,6 +4,36 @@ use std::thread;
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn treiber_stack(c: &mut Criterion) {
+    c.bench_function("trieber_stack-haphazard", |b| {
+        b.iter(|| {
+            let stack = Arc::new(haphazard_stack::TreiberStack::new());
+
+            let handles = (0..66)
+                .map(|_| {
+                    let stack = stack.clone();
+                    thread::spawn(move || {
+                        for i in 0..1000 {
+                            stack.push(i);
+                            assert!(stack.pop().is_some());
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for i in 0..1000 {
+                stack.push(i);
+                assert!(stack.pop().is_some());
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            assert!(stack.pop().is_none());
+            assert!(stack.is_empty());
+        })
+    });
+
     c.bench_function("trieber_stack-seize", |b| {
         b.iter(|| {
             let stack = Arc::new(seize_stack::TreiberStack::new());
@@ -12,7 +42,7 @@ fn treiber_stack(c: &mut Criterion) {
                 .map(|_| {
                     let stack = stack.clone();
                     thread::spawn(move || {
-                        for i in 0..100 {
+                        for i in 0..1000 {
                             stack.push(i);
                             assert!(stack.pop().is_some());
                         }
@@ -20,7 +50,7 @@ fn treiber_stack(c: &mut Criterion) {
                 })
                 .collect::<Vec<_>>();
 
-            for i in 0..100 {
+            for i in 0..1000 {
                 stack.push(i);
                 assert!(stack.pop().is_some());
             }
@@ -34,35 +64,36 @@ fn treiber_stack(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("treiber_stack-flize", |b| {
-        b.iter(|| {
-            let stack = Arc::new(flize_stack::TreiberStack::new());
+    // segfaults :(
+    // c.bench_function("treiber_stack-flize", |b| {
+    //     b.iter(|| {
+    //         let stack = Arc::new(flize_stack::TreiberStack::new());
 
-            let handles = (0..66)
-                .map(|_| {
-                    let stack = stack.clone();
-                    thread::spawn(move || {
-                        for i in 0..100 {
-                            stack.push(i);
-                            assert!(stack.pop().is_some());
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
+    //         let handles = (0..66)
+    //             .map(|_| {
+    //                 let stack = stack.clone();
+    //                 thread::spawn(move || {
+    //                     for i in 0..1000 {
+    //                         stack.push(i);
+    //                         assert!(stack.pop().is_some());
+    //                     }
+    //                 })
+    //             })
+    //             .collect::<Vec<_>>();
 
-            for i in 0..100 {
-                stack.push(i);
-                assert!(stack.pop().is_some());
-            }
+    //         for i in 0..1000 {
+    //             stack.push(i);
+    //             assert!(stack.pop().is_some());
+    //         }
 
-            for handle in handles {
-                handle.join().unwrap();
-            }
+    //         for handle in handles {
+    //             handle.join().unwrap();
+    //         }
 
-            assert!(stack.pop().is_none());
-            assert!(stack.is_empty());
-        })
-    });
+    //         assert!(stack.pop().is_none());
+    //         assert!(stack.is_empty());
+    //     })
+    // });
 }
 
 criterion_group!(benches, treiber_stack);
@@ -248,6 +279,109 @@ mod flize_stack {
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.thin_shield();
             self.head.load(Ordering::Acquire, &guard).is_null()
+        }
+    }
+
+    impl<T> Drop for TreiberStack<T> {
+        fn drop(&mut self) {
+            while self.pop().is_some() {}
+        }
+    }
+}
+
+mod haphazard_stack {
+    use haphazard::{Global, HazPtrObject, HazPtrObjectWrapper, HazardPointer};
+    use std::mem::ManuallyDrop;
+    use std::ptr;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    #[derive(Debug)]
+    pub struct TreiberStack<T: 'static> {
+        head: AtomicPtr<HazPtrObjectWrapper<'static, Node<T>, Global>>,
+    }
+
+    #[derive(Debug)]
+    struct Node<T> {
+        data: ManuallyDrop<T>,
+        next: AtomicPtr<HazPtrObjectWrapper<'static, Node<T>, Global>>,
+    }
+
+    impl<T> TreiberStack<T> {
+        pub fn new() -> TreiberStack<T> {
+            TreiberStack {
+                head: AtomicPtr::default(),
+            }
+        }
+
+        pub fn push(&self, t: T) {
+            let n = Box::into_raw(Box::new(HazPtrObjectWrapper::with_global_domain(Node {
+                data: ManuallyDrop::new(t),
+                next: AtomicPtr::default(),
+            })));
+
+            let mut h = HazardPointer::make_global();
+
+            loop {
+                let head = unsafe {
+                    h.protect(&self.head)
+                        .map(|x| x as *const _)
+                        .unwrap_or(ptr::null())
+                };
+
+                unsafe { (*n).next.store(head as *mut _, Ordering::Relaxed) }
+
+                if self
+                    .head
+                    .compare_exchange(head as *mut _, n, Ordering::Release, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+
+        pub fn pop(&self) -> Option<T> {
+            let mut p1 = HazardPointer::make_global();
+            let mut p2 = HazardPointer::make_global();
+
+            loop {
+                let head = unsafe { p1.protect(&self.head) };
+
+                match head {
+                    Some(h) => {
+                        let next = unsafe {
+                            p2.protect(&h.next)
+                                .map(|x| x as *const _)
+                                .unwrap_or(ptr::null())
+                        };
+
+                        if self
+                            .head
+                            .compare_exchange(
+                                h as *const _ as *mut _,
+                                next as *mut _,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            unsafe {
+                                HazPtrObjectWrapper::<Node<T>, Global>::retire(
+                                    h as *const _ as *mut _,
+                                    &haphazard::deleters::drop_box,
+                                );
+                                return Some(ManuallyDrop::into_inner(ptr::read(&(*h).data)));
+                            }
+                        }
+                    }
+                    None => return None,
+                }
+            }
+        }
+
+        pub fn is_empty(&self) -> bool {
+            let mut p = HazardPointer::make_global();
+            unsafe { p.protect(&self.head) }.is_none()
         }
     }
 
