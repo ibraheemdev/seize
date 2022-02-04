@@ -2,6 +2,12 @@
 name = "seize"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["ibraheem <ibrah1440@gmail.com>"]
+description = "Fast, efficient, and robust memory reclamation for concurrent data structures."
+repository = "https://github.com/ibraheemdev/seize"
+keywords = ["lock-free", "atomic", "garbage"]
+categories = ["concurrency", "memory-management"]
 
 [dependencies]
 num_cpus = "1.13.1"
