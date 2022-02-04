@@ -28,14 +28,14 @@ asynchronous runtimes like [Tokio].
 
 # Details
 
-Seize is based on the [Hyaline reclamation scheme]. Performance is typically on
-par with or better than epoch based schemes, while memory efficiency is similar
-to hazard pointers. Seize uses reference counting decide when to free memory.
-However, counters are only used per batch of _retired_ objects, allowing it to
-avoid the high overhead incurred by traditional reference counting schemes.
-Reclamation is naturally balanced as the thread with the last reference to a
-batch is the one that frees memory. Epochs are also tracked to protect against
-stalled threads, making reclamation truly lock-free.
+Seize is based on the [Hyaline reclamation scheme]. It uses reference counting
+to determine when it is safe to free memory. However, counters are only used per
+batch of _retired_ objects, allowing it to avoid the high overhead incurred by
+traditional reference counting schemes. Performance is typically on par or
+better than epoch based schemes, while memory efficiency is similar to hazard
+pointers. Reclamation is naturally balanced as the thread with the last
+reference to a batch is the one that frees memory. Epochs are also tracked to
+protect against stalled threads, making reclamation truly lock-free.
 
 Seize is compatible with all modern hardware that supports common atomic
 operations such as FAA and CAS.
@@ -221,7 +221,7 @@ collector.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== unsound!
 ```
 
-#### 3. Reclaimers
+#### 3. Custom Reclaimers
 
 You probably noticed that `retire` takes a function as a second parameter. This
 function is known as a _reclaimer_, and is run when the collector decides it is
