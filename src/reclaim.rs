@@ -1,8 +1,8 @@
-//! Common memory reclamation methods.
+//! Common memory reclaimers.
 //!
 //! Functions in this module can be passed to [`retire`](crate::Collector::retire)
-//! to free allocated memory. See [the usage guide](crate#guide) for details about
-//! reclamation in general, and writing custom reclaimers.
+//! to free allocated memory. See [the guide](crate#3-reclaimers) for details about
+//! memory reclamation, and writing custom reclaimers.
 
 use std::ptr;
 
@@ -15,7 +15,7 @@ use crate::Link;
 /// # Safety
 ///
 /// Ensure that the correct type annotations are used when
-/// passing this function to [`retire`](Collector::retire):
+/// passing this function to [`retire`](crate::Collector::retire):
 /// the link passed must have been created from a **valid**
 /// `Linked<T>`.
 pub unsafe fn boxed<T>(mut link: Link) {
@@ -29,7 +29,7 @@ pub unsafe fn boxed<T>(mut link: Link) {
 /// # Safety
 ///
 /// Ensure that the correct type annotations are used when
-/// passing this function to [`retire`](Collector::retire):
+/// passing this function to [`retire`](crate::Collector::retire):
 /// the link passed must have been created from a **valid**
 /// `Linked<T>`.
 pub unsafe fn in_place<T>(mut link: Link) {

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 mod cfg;
 mod collector;
 mod raw;

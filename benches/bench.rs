@@ -131,7 +131,7 @@ mod seize_stack {
                 next: AtomicPtr::new(ptr::null_mut()),
             });
 
-            let guard = self.collector.guard();
+            let guard = self.collector.enter();
 
             loop {
                 let head = guard.protect(&self.head);
@@ -148,7 +148,7 @@ mod seize_stack {
         }
 
         pub fn pop(&self) -> Option<T> {
-            let guard = self.collector.guard();
+            let guard = self.collector.enter();
 
             loop {
                 let head = guard.protect(&self.head);
@@ -175,7 +175,7 @@ mod seize_stack {
         }
 
         pub fn is_empty(&self) -> bool {
-            let guard = self.collector.guard();
+            let guard = self.collector.enter();
             guard.protect(&self.head).is_null()
         }
     }

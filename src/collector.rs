@@ -4,9 +4,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-/// Fast and robust lock-free memory reclamation for Rust.
+/// Fast, efficient, and robust memory reclamation.
 ///
-/// See the [guide](crate#guide) for usage details.
+/// See the [crate documentation](crate) for details.
 pub struct Collector {
     raw: raw::Collector,
 }
@@ -54,9 +54,12 @@ impl Collector {
     /// in and batches are eventually reclaimed.
     ///
     /// A larger batch size means that deallocation is done
-    /// less frequently, but retirement also becomes more
+    /// less frequently, but reclamation also becomes more
     /// expensive due to longer retirement lists needing
     /// to be traversed and freed.
+    ///
+    /// Note that batch sizes should generally be larger
+    /// than the number of threads accessing objects.
     ///
     /// The default batch size is `120`. Tests have shown that
     /// this makes a good tradeoff between throughput and memory
@@ -68,8 +71,8 @@ impl Collector {
 
     /// Returns a guard that can protect loads of atomic pointers.
     ///
-    /// See the [usage guide](crate#guide) for details.
-    pub fn guard(&self) -> Guard<'_> {
+    /// See [the guide](crate#beginning-operations) for details.
+    pub fn enter(&self) -> Guard<'_> {
         self.raw.enter();
 
         Guard {
@@ -80,13 +83,7 @@ impl Collector {
 
     /// Link a value to the collector.
     ///
-    /// Seize requires an extra node to be allocated
-    /// with each value in order to keep track of
-    /// it's reclamation status. Because of this, values
-    /// in a concurrent datastructure must take the form of
-    /// `AtomicPtr<Linked<T>>`, as opposed to `AtomicPtr<T>`.
-    ///
-    /// See the [usage guide](crate#guide) for details.
+    /// See [the guide](crate#allocating-objects) for details.
     pub fn link<T>(&self, value: T) -> Linked<T> {
         Linked {
             value,
@@ -107,14 +104,8 @@ impl Collector {
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
     ///
-    /// See the [usage guide](crate#guide) for details.
-    ///
-    /// # Safety
-    ///
-    /// The provided `reclaim` function must be appropriate for the provided pointer.
-    ///
-    /// Unlike memory reclamation algorithms like EBR, a retired pointer may be reclaimed
-    /// immediately by the current thread, so accessing it is **undefined behavior**.
+    /// See [the guide](crate#retiring-objects) for details.
+    #[allow(clippy::missing_safety_doc)] // in guide
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         self.raw.retire(ptr, reclaim)
     }
@@ -138,8 +129,9 @@ impl fmt::Debug for Collector {
 
 /// A guard that can protect loads of atomic pointers.
 ///
-/// A guard can be created from a [collector](Collector::guard).
-/// See the [usage guide](crate#guide) for details.
+/// A guard can be created from a [collector](Collector::enter).
+///
+/// See [the guide](crate#beginning-operations) for details.
 pub struct Guard<'a> {
     collector: &'a Collector,
     _not_send: PhantomData<*mut ()>,
@@ -148,7 +140,7 @@ pub struct Guard<'a> {
 impl Guard<'_> {
     /// Protect the load of an atomic pointer.
     ///
-    /// See the [usage guide](crate#guide) for details.
+    /// See [the guide](crate#protecting-pointers) for details.
     pub fn protect<T>(&self, ptr: &AtomicPtr<Linked<T>>) -> *mut Linked<T> {
         self.collector.raw.protect(ptr)
     }
@@ -162,7 +154,7 @@ impl Drop for Guard<'_> {
 
 /// The link part of a [`Linked<T>`].
 ///
-/// See the [usage guide](crate#guide) for details.
+/// See [the guide](crate#3-reclaimers) for details.
 pub struct Link {
     pub(crate) node: *mut raw::Node,
 }
@@ -178,18 +170,17 @@ impl Link {
     }
 }
 
-/// A value linked to a collector.
+/// A value [linked](Collector::link) to a collector.
 ///
 /// This type implements `Deref` and `DerefMut` to the
 /// inner value, so you can access methods on fields
 /// on it as normal. An extra `*` may be needed when
 /// `T` needs to be accessed directly.
 ///
-/// A value can be linked with the [`Collector::link`] method.
-/// See it's documentation for details.
+/// See [the guide](crate#allocating-objects) for details.
 #[repr(C)]
 pub struct Linked<T> {
-    pub(crate) node: raw::Node, // invariant: this field must come first
+    pub(crate) node: raw::Node, // Safety Invariant: this field must come first
     value: T,
 }
 
