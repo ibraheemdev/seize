@@ -117,18 +117,19 @@ impl Collector {
         (*node).reclaim = reclaim;
 
         if batch.head.is_null() {
-            // REFS node: use the `batch.ref_count = 0`
-            // that it was initialized with
-            batch.min_epoch = (*node).reservation.birth_epoch;
             batch.tail = node;
+            // REFS: implicit `node.batch.ref_count = 0`
         } else {
-            if batch.min_epoch > (*node).reservation.birth_epoch {
-                batch.min_epoch = (*node).reservation.birth_epoch;
+            // Reuse the birth era of REFS to retain
+            // the minimum birth era in the batch
+            if (*batch.tail).reservation.min_epoch > (*node).reservation.min_epoch {
+                (*batch.tail).reservation.min_epoch = (*node).reservation.min_epoch;
             }
 
+            // point to REFS
             (*node).batch_link = batch.tail;
 
-            // SLOT node: link it to the batch
+            // link to batch
             (*node).batch.next = batch.head;
         }
 
@@ -183,7 +184,7 @@ impl Collector {
                 continue;
             }
 
-            if reservation.epoch.load(Ordering::Acquire) < batch.min_epoch {
+            if reservation.epoch.load(Ordering::Acquire) < (*batch.tail).reservation.min_epoch {
                 continue;
             }
 
@@ -296,6 +297,8 @@ union ReservationNode {
     next: ManuallyDrop<AtomicPtr<Node>>,
     // SLOT (while retiring): temporary location for an active reservation list
     head: *const AtomicPtr<Node>,
+    // REFS: minimum epoch of nodes in a batch
+    min_epoch: u64,
 }
 
 #[repr(C)]
@@ -345,8 +348,6 @@ struct Batch {
     tail: *mut Node,
     // The number of nodes in this batch.
     size: usize,
-    // The minimum epoch across all nodes in this batch.
-    min_epoch: u64,
 }
 
 impl Default for Batch {
@@ -355,7 +356,6 @@ impl Default for Batch {
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
             size: 0,
-            min_epoch: 0,
         }
     }
 }
