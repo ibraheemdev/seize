@@ -125,7 +125,7 @@ impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut strukt = f.debug_struct("Collector");
 
-        if let Some(_) = self.raw.epoch_frequency {
+        if self.raw.epoch_frequency.is_some() {
             strukt.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
         }
 

@@ -76,8 +76,10 @@ impl Collector {
 
     // Mark the current thread as active.
     pub fn enter(&self) {
-        let reservation = self.reservations.get_or(Default::default);
-        reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
+        self.reservations
+            .get_or(Default::default)
+            .head
+            .store(ptr::null_mut(), Ordering::SeqCst);
     }
 
     // Protect an atomic load
