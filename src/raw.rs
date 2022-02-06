@@ -315,9 +315,6 @@ impl Node {
     // While null indicates an empty list, INACTIVE
     // indicates the thread is not performing
     // an operation on the datastructure.
-    //
-    // Note that operatign systems reserve -` for errors,
-    // and it will never represent a valid pointer.
     pub const INACTIVE: *mut Node = -1_isize as usize as _;
 }
 
