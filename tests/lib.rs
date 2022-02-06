@@ -1,8 +1,8 @@
-use seize::{reclaim, Collector, Linked};
+use seize::{reclaim, AtomicPtr, Collector};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 
@@ -24,14 +24,14 @@ mod cfg {
 fn stress() {
     #[derive(Debug)]
     pub struct TreiberStack<T> {
-        head: AtomicPtr<Linked<Node<T>>>,
+        head: AtomicPtr<Node<T>>,
         collector: Collector,
     }
 
     #[derive(Debug)]
     struct Node<T> {
         data: ManuallyDrop<T>,
-        next: AtomicPtr<Linked<Node<T>>>,
+        next: AtomicPtr<Node<T>>,
     }
 
     impl<T> TreiberStack<T> {
@@ -43,7 +43,7 @@ fn stress() {
         }
 
         pub fn push(&self, t: T) {
-            let n = self.collector.link_boxed(Node {
+            let new = self.collector.link_boxed(Node {
                 data: ManuallyDrop::new(t),
                 next: AtomicPtr::new(ptr::null_mut()),
             });
@@ -52,11 +52,11 @@ fn stress() {
 
             loop {
                 let head = guard.protect(&self.head);
-                unsafe { (*n).next.store(head, Ordering::SeqCst) }
+                unsafe { (*new).next.store(head, Ordering::Relaxed) }
 
                 if self
                     .head
-                    .compare_exchange(head, n, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(head, new, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     break;
@@ -70,23 +70,22 @@ fn stress() {
             loop {
                 let head = guard.protect(&self.head);
 
-                match unsafe { head.as_ref() } {
-                    Some(h) => {
-                        let next = guard.protect(&h.next);
+                if head.is_null() {
+                    return None;
+                }
 
-                        if self
-                            .head
-                            .compare_exchange(head, next, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            unsafe {
-                                let data = ptr::read(&(*h).data);
-                                self.collector.retire(head, reclaim::boxed::<Node<T>>);
-                                return Some(ManuallyDrop::into_inner(data));
-                            }
-                        }
+                let next = unsafe { guard.protect(&(*head).next) };
+
+                if self
+                    .head
+                    .compare_exchange(head, next, Ordering::Release, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    unsafe {
+                        let data = ptr::read(&(*head).data);
+                        self.collector.retire(head, reclaim::boxed::<Node<T>>);
+                        return Some(ManuallyDrop::into_inner(data));
                     }
-                    None => return None,
                 }
             }
         }

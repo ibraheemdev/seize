@@ -2,7 +2,7 @@ use crate::raw;
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Fast, efficient, and robust memory reclamation.
 ///
@@ -141,7 +141,7 @@ impl Guard<'_> {
     /// Protect the load of an atomic pointer.
     ///
     /// See [the guide](crate#protecting-pointers) for details.
-    pub fn protect<T>(&self, ptr: &AtomicPtr<Linked<T>>) -> *mut Linked<T> {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut Linked<T> {
         self.collector.raw.protect(ptr)
     }
 }
@@ -209,3 +209,8 @@ impl<T> std::ops::DerefMut for Linked<T> {
         &mut self.value
     }
 }
+
+/// A linked atomic pointer.
+///
+/// This is simply a type alias for `std::AtomicPtr<Linked<T>>`.
+pub type AtomicPtr<T> = std::sync::atomic::AtomicPtr<Linked<T>>;
