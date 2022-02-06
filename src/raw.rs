@@ -116,13 +116,16 @@ impl Collector {
         }
     }
 
-    // Defer deallocation of a value until no threads reference it
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn delayed_retire<T>(
+        &self,
+        ptr: *mut Linked<T>,
+        reclaim: unsafe fn(Link),
+    ) -> (bool, &mut Batch) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
-
         trace!("retiring pointer");
 
         let batch = &mut *self.batches.get_or(Default::default).get();
+
         let node = ptr::addr_of_mut!((*ptr).node);
 
         (*node).reclaim = reclaim;
@@ -157,47 +160,18 @@ impl Collector {
         batch.head = node;
         batch.size += 1;
 
-        if batch.size % self.batch_size == 0 {
-            (*batch.tail).batch_link = node;
-            self.try_retire(batch);
-        }
+        (batch.size % self.batch_size == 0, batch)
     }
 
-    // Mark the current thread as inactive.
-    pub fn leave(&self) {
-        trace!("marking thread as inactive");
-
-        let reservation = self.reservations.get_or(Default::default);
-        let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
-
-        if head != Node::INACTIVE {
-            unsafe { Collector::traverse(head) }
-        }
-    }
-
-    // Traverse the reservation list, decrementing the refernce
-    // count of each batch.
-    unsafe fn traverse(mut list: *mut Node) {
-        trace!("decrementing batch reference counts");
-
-        loop {
-            let curr = list;
-            if curr.is_null() {
-                break;
-            }
-
-            list = (*curr).reservation.next.load(Ordering::Acquire);
-
-            let refs = (*curr).batch_link;
-            if (*refs).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                Collector::free_list(refs);
-            }
-        }
+    pub unsafe fn retire_batch(&self) {
+        self.retire(&mut *self.batches.get_or(Default::default).get());
     }
 
     // Attempt to retire nodes in this batch.
-    unsafe fn try_retire(&self, batch: &mut Batch) {
+    pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
+
+        (*batch.tail).batch_link = batch.head;
 
         let mut last = batch.head;
         for reservation in self.reservations.iter() {
@@ -260,6 +234,38 @@ impl Collector {
 
         batch.head = ptr::null_mut();
         batch.size = 0;
+    }
+
+    // Mark the current thread as inactive.
+    pub fn leave(&self) {
+        trace!("marking thread as inactive");
+
+        let reservation = self.reservations.get_or(Default::default);
+        let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
+
+        if head != Node::INACTIVE {
+            unsafe { Collector::traverse(head) }
+        }
+    }
+
+    // Traverse the reservation list, decrementing the refernce
+    // count of each batch.
+    unsafe fn traverse(mut list: *mut Node) {
+        trace!("decrementing batch reference counts");
+
+        loop {
+            let curr = list;
+            if curr.is_null() {
+                break;
+            }
+
+            list = (*curr).reservation.next.load(Ordering::Acquire);
+
+            let refs = (*curr).batch_link;
+            if (*refs).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                Collector::free_list(refs);
+            }
+        }
     }
 
     // Free a reservation list.
@@ -364,7 +370,7 @@ impl Default for Reservation {
 }
 
 // A batch of nodes waiting to be retired.
-struct Batch {
+pub struct Batch {
     // Head the batch
     head: *mut Node,
     // Tail of the batch (REFS)

@@ -1,7 +1,7 @@
 use crate::raw;
 
+use std::cell::UnsafeCell;
 use std::fmt;
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 
@@ -81,7 +81,7 @@ impl Collector {
 
         Guard {
             collector: self,
-            _not_send: PhantomData,
+            should_retire: UnsafeCell::new(false),
         }
     }
 
@@ -111,7 +111,11 @@ impl Collector {
     /// See [the guide](crate#retiring-objects) for details.
     #[allow(clippy::missing_safety_doc)] // in guide
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
-        self.raw.retire(ptr, reclaim)
+        let (should_retire, batch) = self.raw.delayed_retire(ptr, reclaim);
+
+        if should_retire {
+            self.raw.retire(batch);
+        }
     }
 }
 
@@ -143,7 +147,7 @@ impl fmt::Debug for Collector {
 /// See [the guide](crate#beginning-operations) for details.
 pub struct Guard<'a> {
     collector: &'a Collector,
-    _not_send: PhantomData<*mut ()>,
+    should_retire: UnsafeCell<bool>,
 }
 
 impl Guard<'_> {
@@ -153,11 +157,29 @@ impl Guard<'_> {
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut Linked<T> {
         self.collector.raw.protect(ptr)
     }
+
+    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    ///
+    /// This method delays reclamation until the guard is dropped as opposed to
+    /// [`Collector::retire`], which may reclaim objects immediately.
+    ///
+    /// See [the guide](crate#retiring-objects) for details.
+    #[allow(clippy::missing_safety_doc)] // in guide
+    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+        let (should_retire, _) = self.collector.raw.delayed_retire(ptr, reclaim);
+        *self.should_retire.get() |= should_retire;
+    }
 }
 
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        self.collector.raw.leave()
+        self.collector.raw.leave();
+
+        unsafe {
+            if *self.should_retire.get() {
+                self.collector.raw.retire_batch();
+            }
+        }
     }
 }
 
