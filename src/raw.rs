@@ -121,7 +121,6 @@ impl Collector {
         ptr: *mut Linked<T>,
         reclaim: unsafe fn(Link),
     ) -> (bool, &mut Batch) {
-        debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
         trace!("retiring pointer");
 
         let batch = &mut *self.batches.get_or(Default::default).get();
