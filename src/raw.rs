@@ -5,6 +5,7 @@ use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
+use std::num::NonZeroU64;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
@@ -21,19 +22,19 @@ pub struct Collector {
     // The number of nodes allocated per-thread.
     node_count: ThreadLocal<UnsafeCell<u64>>,
     // The number of node allocations before advancing the global epoch.
-    pub(crate) epoch_frequency: u64,
+    pub(crate) epoch_frequency: Option<NonZeroU64>,
     // The number of nodes in a batch before we free.
     pub(crate) batch_size: usize,
 }
 
 impl Collector {
-    pub fn with_threads(threads: usize, epoch_frequency: u64, batch_size: usize) -> Self {
+    pub fn with_threads(threads: usize, epoch_frequency: NonZeroU64, batch_size: usize) -> Self {
         Self {
             epoch: AtomicU64::new(1),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             node_count: ThreadLocal::with_capacity(threads),
-            epoch_frequency,
+            epoch_frequency: Some(epoch_frequency),
             batch_size,
         }
     }
@@ -47,14 +48,16 @@ impl Collector {
             *count += 1;
             trace!("allocated new value, values: {}", *count);
 
-            if *count % self.epoch_frequency == 0 {
-                // Advance the global epoch
-                //
-                // This release store synchronizes with all acquires
-                // of the epoch. The relaxed load is fine because we
-                // only use it for tracing.
-                let _epoch = self.epoch.fetch_add(1, Ordering::Release);
-                trace!("advancing global epoch to {}", _epoch + 1);
+            if let Some(ref epoch_frequency) = self.epoch_frequency {
+                if *count % epoch_frequency.get() == 0 {
+                    // Advance the global epoch
+                    //
+                    // This release store synchronizes with all acquires
+                    // of the epoch. The relaxed load is fine because we
+                    // only use it for tracing.
+                    let _epoch = self.epoch.fetch_add(1, Ordering::Release);
+                    trace!("advancing global epoch to {}", _epoch + 1);
+                }
             }
         }
 
@@ -79,29 +82,35 @@ impl Collector {
 
     // Protect an atomic load
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut T {
-        let reservation = self.reservations.get_or(Default::default);
+        match self.epoch_frequency {
+            Some(_) => {
+                let reservation = self.reservations.get_or(Default::default);
 
-        trace!("protecting pointer");
+                trace!("protecting pointer");
 
-        let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
+                let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
 
-        loop {
-            let ptr = ptr.load(Ordering::SeqCst);
+                loop {
+                    let ptr = ptr.load(Ordering::SeqCst);
 
-            let current_epoch = self.epoch.load(Ordering::Acquire);
+                    let current_epoch = self.epoch.load(Ordering::Acquire);
 
-            if prev_epoch == current_epoch {
-                return ptr;
-            } else {
-                trace!(
-                    "updating epoch for from {} to {}",
-                    prev_epoch,
-                    current_epoch
-                );
+                    if prev_epoch == current_epoch {
+                        return ptr;
+                    } else {
+                        trace!(
+                            "updating epoch for from {} to {}",
+                            prev_epoch,
+                            current_epoch
+                        );
 
-                reservation.epoch.store(current_epoch, Ordering::SeqCst);
-                prev_epoch = current_epoch;
+                        reservation.epoch.store(current_epoch, Ordering::SeqCst);
+                        prev_epoch = current_epoch;
+                    }
+                }
             }
+            // epoch tracking is disabled, nothing special needed here
+            None => ptr.load(Ordering::SeqCst),
         }
     }
 
@@ -118,12 +127,22 @@ impl Collector {
 
         if batch.head.is_null() {
             batch.tail = node;
-            // REFS: implicit `node.batch.ref_count = 0`
+
+            // if epoch tracking is disabled, set the minimum epoch of
+            // this batch epoch to 0 so that we never skip a thread while
+            // retiring (reservation epochs will stay 0 as well).
+            if self.epoch_frequency.is_none() {
+                (*batch.tail).reservation.min_epoch = 0;
+            }
+
+            // implicit `node.batch.ref_count = 0`
         } else {
             // Reuse the birth era of REFS to retain
-            // the minimum birth era in the batch
-            if (*batch.tail).reservation.min_epoch > (*node).reservation.min_epoch {
-                (*batch.tail).reservation.min_epoch = (*node).reservation.min_epoch;
+            // the minimum birth era in the batch.
+            //
+            // If epoch tracking is disabled this will always be false (0 > 1).
+            if (*batch.tail).reservation.min_epoch > (*node).reservation.birth_epoch {
+                (*batch.tail).reservation.min_epoch = (*node).reservation.birth_epoch;
             }
 
             // point to REFS
@@ -184,6 +203,11 @@ impl Collector {
                 continue;
             }
 
+            // If this thread's epoch is behind all the nodes
+            // in the batch, we don't need to include it in the
+            // reference count.
+            //
+            // If epoch tracking is disabled this is always false (0 < 0).
             if reservation.epoch.load(Ordering::Acquire) < (*batch.tail).reservation.min_epoch {
                 continue;
             }

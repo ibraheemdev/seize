@@ -2,6 +2,7 @@ use crate::raw;
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 
 /// Fast, efficient, and robust memory reclamation.
@@ -12,8 +13,8 @@ pub struct Collector {
 }
 
 impl Collector {
-    const DEFAULT_EPOCH_TICK: u64 = 110;
     const DEFAULT_RETIRE_TICK: usize = 120;
+    const DEFAULT_EPOCH_TICK: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(110) };
 
     /// Creates a new collector.
     pub fn new() -> Self {
@@ -39,7 +40,10 @@ impl Collector {
     /// linked to the collector. Benchmarking has shown that
     /// this is a good tradeoff between throughput and memory
     /// efficiency.
-    pub fn epoch_frequency(mut self, n: u64) -> Self {
+    ///
+    /// If `None` is passed epoch tracking, and protection
+    /// against stalled threads, will be disabled completely.
+    pub fn epoch_frequency(mut self, n: Option<NonZeroU64>) -> Self {
         self.raw.epoch_frequency = n;
         self
     }
@@ -119,8 +123,13 @@ impl Default for Collector {
 
 impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Collector")
-            .field("epoch", &self.raw.epoch.load(Ordering::Acquire))
+        let mut strukt = f.debug_struct("Collector");
+
+        if let Some(_) = self.raw.epoch_frequency {
+            strukt.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
+        }
+
+        strukt
             .field("batch_size", &self.raw.batch_size)
             .field("epoch_frequency", &self.raw.epoch_frequency)
             .finish()
