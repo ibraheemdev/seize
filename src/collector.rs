@@ -166,7 +166,7 @@ impl Guard<'_> {
     /// on a data structure that has just been created or is about
     /// to be destroyed, because you know that know other thread holds
     /// a reference to it.
-    pub unsafe fn unprotected() -> Guard<'static> {
+    pub const unsafe fn unprotected() -> Guard<'static> {
         Guard {
             collector: ptr::null(),
             should_retire: UnsafeCell::new(false),
@@ -220,6 +220,12 @@ impl Drop for Guard<'_> {
     }
 }
 
+impl fmt::Debug for Guard<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Guard").finish()
+    }
+}
+
 /// The link part of a [`Linked<T>`].
 ///
 /// See [the guide](crate#3-reclaimers) for details.
@@ -251,6 +257,20 @@ pub struct Linked<T> {
     pub(crate) node: raw::Node, // Safety Invariant: this field must come first
     value: T,
 }
+
+impl<T> Linked<T> {
+    pub fn into_inner(linked: Linked<T>) -> T {
+        linked.value
+    }
+}
+
+impl<T: PartialEq> PartialEq for Linked<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Eq> Eq for Linked<T> {}
 
 impl<T: fmt::Debug> fmt::Debug for Linked<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
