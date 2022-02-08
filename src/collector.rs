@@ -166,6 +166,11 @@ impl Guard<'_> {
     /// on a data structure that has just been created or is about
     /// to be destroyed, because you know that know other thread holds
     /// a reference to it.
+    ///
+    /// # Safety
+    ///
+    /// You must ensure that code used with this guard is sound with
+    /// the unprotected behavior described above.
     pub const unsafe fn unprotected() -> Guard<'static> {
         Guard {
             collector: ptr::null(),
