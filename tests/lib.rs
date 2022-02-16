@@ -211,12 +211,12 @@ fn two_threads() {
     ));
 
     let h = std::thread::spawn({
-        let foo = one.clone();
+        let one = one.clone();
         let collector = collector.clone();
 
         move || {
             let guard = collector.enter();
-            let _value = guard.protect(&foo);
+            let _value = guard.protect(&one);
             tx.send(()).unwrap();
             drop(guard);
             tx.send(()).unwrap();
