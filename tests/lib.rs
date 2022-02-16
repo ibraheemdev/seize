@@ -135,7 +135,8 @@ fn stress() {
 fn delayed_retire() {
     let collector = Collector::new().batch_size(5);
     let objects: Vec<*mut Linked<usize>> = (0..30).map(|_| collector.link_boxed(42)).collect();
-    let references: Vec<&Linked<usize>> = objects.iter().map(|x| unsafe { &**x }).collect();
+    let linked_references: Vec<&Linked<usize>> = objects.iter().map(|x| unsafe { &**x }).collect();
+    let references: Vec<&usize> = objects.iter().map(|x| unsafe { &***x }).collect();
 
     let guard = collector.enter();
 
@@ -145,8 +146,12 @@ fn delayed_retire() {
         }
     }
 
-    for x in references {
+    for x in linked_references {
         assert_eq!(**x, 42);
+    }
+
+    for x in references {
+        assert_eq!(*x, 42);
     }
 
     drop(guard);
