@@ -255,10 +255,17 @@ fn collector_eq() {
     let b = Collector::new();
     let unprotected = unsafe { Guard::unprotected() };
 
-    assert_eq!(a.enter().collector(), a.enter().collector());
-    assert_eq!(a.enter().collector(), a.enter().collector());
-    assert_ne!(a.enter().collector(), b.enter().collector());
-    assert_ne!(a.enter().collector(), unprotected.collector());
-    assert_ne!(b.enter().collector(), unprotected.collector());
-    assert_eq!(unprotected.collector(), None);
+    assert!(Collector::ptr_eq(
+        a.enter().collector().unwrap(),
+        a.enter().collector().unwrap()
+    ));
+    assert!(Collector::ptr_eq(
+        a.enter().collector().unwrap(),
+        a.enter().collector().unwrap()
+    ));
+    assert!(!Collector::ptr_eq(
+        a.enter().collector().unwrap(),
+        b.enter().collector().unwrap()
+    ));
+    assert!(unprotected.collector().is_none());
 }

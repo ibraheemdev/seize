@@ -126,15 +126,12 @@ impl Collector {
             self.raw.retire(batch);
         }
     }
-}
 
-impl PartialEq for Collector {
-    fn eq(&self, other: &Self) -> bool {
-        ptr::eq(self.unique, other.unique)
+    /// Returns true if both references point to the same collector.
+    pub fn ptr_eq(this: &Collector, other: &Collector) -> bool {
+        ptr::eq(this.unique, other.unique)
     }
 }
-
-impl Eq for Collector {}
 
 impl Default for Collector {
     fn default() -> Self {
