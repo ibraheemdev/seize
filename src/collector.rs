@@ -93,7 +93,7 @@ impl Collector {
     pub fn link<T>(&self, value: T) -> Linked<T> {
         Linked {
             value,
-            node: self.raw.node(),
+            node: UnsafeCell::new(self.raw.node()),
         }
     }
 
@@ -259,7 +259,7 @@ impl Link {
 /// See [the guide](crate#allocating-objects) for details.
 #[repr(C)]
 pub struct Linked<T> {
-    pub(crate) node: raw::Node, // Safety Invariant: this field must come first
+    pub(crate) node: UnsafeCell<raw::Node>, // Safety Invariant: this field must come first
     value: T,
 }
 

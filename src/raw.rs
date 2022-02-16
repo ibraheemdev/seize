@@ -125,7 +125,7 @@ impl Collector {
 
         let batch = &mut *self.batches.get_or(Default::default).get();
 
-        let node = ptr::addr_of_mut!((*ptr).node);
+        let node = UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node));
 
         (*node).reclaim = reclaim;
 

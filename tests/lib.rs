@@ -1,8 +1,8 @@
-use seize::{reclaim, AtomicPtr, Collector};
+use seize::{reclaim, AtomicPtr, Collector, Linked};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -129,4 +129,117 @@ fn stress() {
         assert!(stack.pop().is_none());
         assert!(stack.is_empty());
     }
+}
+
+#[test]
+fn delayed_retire() {
+    let collector = Collector::new().batch_size(5);
+    let objects: Vec<*mut Linked<usize>> = (0..30).map(|_| collector.link_boxed(42)).collect();
+    let references: Vec<&Linked<usize>> = objects.iter().map(|x| unsafe { &**x }).collect();
+
+    let guard = collector.enter();
+
+    for object in objects {
+        unsafe {
+            guard.retire(object, reclaim::boxed::<usize>);
+        }
+    }
+
+    for x in references {
+        assert_eq!(**x, 42);
+    }
+
+    drop(guard);
+}
+
+#[test]
+fn single_thread() {
+    struct Foo(usize, Arc<AtomicUsize>);
+
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    let collector = Arc::new(Collector::new().batch_size(2));
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..22 {
+        let zero = AtomicPtr::new(collector.link_boxed(Foo(0, dropped.clone())));
+
+        {
+            let guard = collector.enter();
+            let _ = guard.protect(&zero);
+        }
+
+        {
+            let guard = collector.enter();
+            let value = guard.protect(&zero);
+            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+        }
+    }
+
+    assert_eq!(dropped.load(Ordering::Acquire), 22);
+}
+
+#[test]
+fn two_threads() {
+    struct Foo(usize, Arc<AtomicBool>);
+
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            self.1.store(true, Ordering::Release);
+        }
+    }
+
+    let collector = Arc::new(Collector::new().batch_size(3));
+
+    let one_dropped = Arc::new(AtomicBool::new(false));
+    let zero_dropped = Arc::new(AtomicBool::new(false));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let one = Arc::new(AtomicPtr::new(
+        collector.link_boxed(Foo(1, one_dropped.clone())),
+    ));
+
+    let h = std::thread::spawn({
+        let foo = one.clone();
+        let collector = collector.clone();
+
+        move || {
+            let guard = collector.enter();
+            let _value = guard.protect(&foo);
+            tx.send(()).unwrap();
+            drop(guard);
+            tx.send(()).unwrap();
+        }
+    });
+
+    for _ in 0..2 {
+        let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
+        let guard = collector.enter();
+        let value = guard.protect(&zero);
+        unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+    }
+
+    let _ = rx.recv().unwrap(); // wait for thread to access value
+    let guard = collector.enter();
+    let value = guard.protect(&one);
+    unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+
+    let _ = rx.recv().unwrap(); // wait for thread to drop guard
+    h.join().unwrap();
+
+    drop(guard);
+
+    assert_eq!(
+        (
+            zero_dropped.load(Ordering::Acquire),
+            one_dropped.load(Ordering::Acquire)
+        ),
+        (true, true)
+    );
 }
