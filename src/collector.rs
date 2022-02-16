@@ -133,6 +133,14 @@ impl Collector {
     }
 }
 
+impl Drop for Collector {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = Box::from_raw(self.unique);
+        }
+    }
+}
+
 impl Clone for Collector {
     fn clone(&self) -> Self {
         Collector::new()
