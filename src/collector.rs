@@ -11,7 +11,11 @@ use std::{fmt, ptr};
 /// See the [crate documentation](crate) for details.
 pub struct Collector {
     raw: raw::Collector,
+    unique: *mut u8,
 }
+
+unsafe impl Send for Collector {}
+unsafe impl Sync for Collector {}
 
 impl Collector {
     const DEFAULT_RETIRE_TICK: usize = 120;
@@ -25,6 +29,7 @@ impl Collector {
                 Self::DEFAULT_EPOCH_TICK,
                 Self::DEFAULT_RETIRE_TICK,
             ),
+            unique: Box::into_raw(Box::new(0)),
         }
     }
 
@@ -123,6 +128,14 @@ impl Collector {
     }
 }
 
+impl PartialEq for Collector {
+    fn eq(&self, other: &Self) -> bool {
+        ptr::eq(self.unique, other.unique)
+    }
+}
+
+impl Eq for Collector {}
+
 impl Default for Collector {
     fn default() -> Self {
         Self::new()
@@ -206,6 +219,17 @@ impl Guard<'_> {
 
         let (should_retire, _) = (*self.collector).raw.delayed_retire(ptr, reclaim);
         *self.should_retire.get() |= should_retire;
+    }
+
+    /// Get a reference to the collector this guard we created from.
+    ///
+    /// This method is useful when you need to ensure that all guards
+    /// used with a data structure come from the same collector.
+    ///
+    /// If this is an [`unprotected`](Guard::unprotected) guard
+    /// this method will return `None`.
+    pub fn collector(&self) -> Option<&Collector> {
+        unsafe { self.collector.as_ref() }
     }
 }
 

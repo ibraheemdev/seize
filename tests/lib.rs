@@ -1,4 +1,4 @@
-use seize::{reclaim, AtomicPtr, Collector, Linked};
+use seize::{reclaim, AtomicPtr, Collector, Guard, Linked};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -247,4 +247,18 @@ fn two_threads() {
         ),
         (true, true)
     );
+}
+
+#[test]
+fn collector_eq() {
+    let a = Collector::new();
+    let b = Collector::new();
+    let unprotected = unsafe { Guard::unprotected() };
+
+    assert_eq!(a.enter().collector(), a.enter().collector());
+    assert_eq!(a.enter().collector(), a.enter().collector());
+    assert_ne!(a.enter().collector(), b.enter().collector());
+    assert_ne!(a.enter().collector(), unprotected.collector());
+    assert_ne!(b.enter().collector(), unprotected.collector());
+    assert_eq!(unprotected.collector(), None);
 }
