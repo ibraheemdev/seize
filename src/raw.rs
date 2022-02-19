@@ -52,10 +52,8 @@ impl Collector {
                 if *count % epoch_frequency.get() == 0 {
                     // Advance the global epoch
                     //
-                    // This release store synchronizes with all acquires
-                    // of the epoch. The relaxed load is fine because we
-                    // only use it for tracing.
-                    let _epoch = self.epoch.fetch_add(1, Ordering::Release);
+                    // Like with most counters, this can be relaxed.
+                    let _epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
                     trace!("advancing global epoch to {}", _epoch + 1);
                 }
             }
@@ -65,8 +63,8 @@ impl Collector {
             reclaim: |_| {},
             batch_link: ptr::null_mut(),
             reservation: ReservationNode {
-                // All loads of the epoch are Acquire
-                birth_epoch: self.epoch.load(Ordering::Acquire),
+                // Record the current epoch value.
+                birth_epoch: self.epoch.load(Ordering::Relaxed),
             },
             batch: BatchNode {
                 ref_count: ManuallyDrop::new(AtomicUsize::new(0)),
@@ -79,40 +77,45 @@ impl Collector {
         self.reservations
             .get_or(Default::default)
             .head
-            .store(ptr::null_mut(), Ordering::SeqCst);
+            // Acquire: entering a critical section, pointer loads
+            // must only occur *after* we mark this thread as active
+            .swap(ptr::null_mut(), Ordering::Acquire);
     }
 
     // Protect an atomic load
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut T {
-        match self.epoch_frequency {
-            Some(_) => {
-                let reservation = self.reservations.get_or(Default::default);
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+        trace!("protecting pointer");
 
-                trace!("protecting pointer");
+        if self.epoch_frequency.is_none() {
+            return ptr.load(ordering);
+        }
 
-                let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
+        let reservation = self.reservations.get_or(Default::default);
 
-                loop {
-                    let ptr = ptr.load(Ordering::SeqCst);
+        // Load the last recorded epoch.
+        let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
-                    let current_epoch = self.epoch.load(Ordering::Acquire);
+        loop {
+            let ptr = ptr.load(ordering);
 
-                    if prev_epoch == current_epoch {
-                        return ptr;
-                    } else {
-                        trace!(
-                            "updating epoch for from {} to {}",
-                            prev_epoch,
-                            current_epoch
-                        );
+            let current_epoch = self.epoch.load(Ordering::Relaxed);
 
-                        reservation.epoch.store(current_epoch, Ordering::SeqCst);
-                        prev_epoch = current_epoch;
-                    }
-                }
+            if prev_epoch == current_epoch {
+                return ptr;
+            } else {
+                trace!(
+                    "updating epoch for from {} to {}",
+                    prev_epoch,
+                    current_epoch
+                );
+
+                // Acquire: entering a critical section, pointer loads
+                // must only occur *after* we mark this thread as active
+                // in this epoch
+                reservation.epoch.swap(current_epoch, Ordering::Acquire);
+
+                prev_epoch = current_epoch;
             }
-            // epoch tracking is disabled, nothing special needed here
-            None => ptr.load(Ordering::SeqCst),
         }
     }
 
@@ -174,13 +177,15 @@ impl Collector {
 
         let mut last = batch.head;
         for reservation in self.reservations.iter() {
-            if reservation.head.load(Ordering::Acquire) == Node::INACTIVE {
+            let head = &reservation.head as *const AtomicPtr<_> as *const AtomicUsize;
+
+            // If this thread is inactive, we can skip it.
+            if (*head).load(Ordering::Acquire) as *mut Node == Node::INACTIVE {
                 continue;
             }
 
             // If this thread's epoch is behind all the nodes
-            // in the batch, we don't need to include it in the
-            // reference count.
+            // in the batch, we can also skip it.
             //
             // If epoch tracking is disabled this is always false (0 < 0).
             if reservation.epoch.load(Ordering::Acquire) < (*batch.tail).reservation.min_epoch {
@@ -203,14 +208,17 @@ impl Collector {
 
             loop {
                 let prev = (*list).load(Ordering::Acquire);
+
                 if prev == Node::INACTIVE {
                     break;
                 }
 
                 (*curr).reservation.next.store(prev, Ordering::Relaxed);
 
+                // Release: Make the store of `reservation.next` above visible
+                // to threads that call `leave`
                 if (*list)
-                    .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange_weak(prev, curr, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     active += 1;
@@ -240,6 +248,9 @@ impl Collector {
         trace!("marking thread as inactive");
 
         let reservation = self.reservations.get_or(Default::default);
+
+        // Release: Leaving the critical section
+        // Acquire: Acquire the store of `reservation.next` in `retire`
         let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
 
         if head != Node::INACTIVE {
@@ -258,11 +269,14 @@ impl Collector {
                 break;
             }
 
-            list = (*curr).reservation.next.load(Ordering::Acquire);
+            // This load can be Relaxed because any stores
+            // in `retire` are made visible by the Acquire/Release
+            // synchronization on `head`
+            list = (*curr).reservation.next.load(Ordering::Relaxed);
 
-            let refs = (*curr).batch_link;
-            if (*refs).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                Collector::free_list(refs);
+            let tail = (*curr).batch_link;
+            if (*tail).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                Collector::free_list(tail);
             }
         }
     }

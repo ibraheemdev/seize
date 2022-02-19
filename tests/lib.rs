@@ -51,7 +51,7 @@ fn stress() {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head);
+                let head = guard.protect(&self.head, Ordering::Acquire);
                 unsafe { (*new).next.store(head, Ordering::Relaxed) }
 
                 if self
@@ -68,13 +68,13 @@ fn stress() {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head);
+                let head = guard.protect(&self.head, Ordering::Acquire);
 
                 if head.is_null() {
                     return None;
                 }
 
-                let next = unsafe { guard.protect(&(*head).next) };
+                let next = unsafe { guard.protect(&(*head).next, Ordering::Acquire) };
 
                 if self
                     .head
@@ -92,7 +92,7 @@ fn stress() {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.enter();
-            guard.protect(&self.head).is_null()
+            guard.protect(&self.head, Ordering::Acquire).is_null()
         }
     }
 
@@ -176,12 +176,12 @@ fn single_thread() {
 
         {
             let guard = collector.enter();
-            let _ = guard.protect(&zero);
+            let _ = guard.protect(&zero, Ordering::Acquire);
         }
 
         {
             let guard = collector.enter();
-            let value = guard.protect(&zero);
+            let value = guard.protect(&zero, Ordering::Acquire);
             unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
         }
     }
@@ -216,7 +216,7 @@ fn two_threads() {
 
         move || {
             let guard = collector.enter();
-            let _value = guard.protect(&one);
+            let _value = guard.protect(&one, Ordering::Acquire);
             tx.send(()).unwrap();
             drop(guard);
             tx.send(()).unwrap();
@@ -226,13 +226,13 @@ fn two_threads() {
     for _ in 0..2 {
         let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
         let guard = collector.enter();
-        let value = guard.protect(&zero);
+        let value = guard.protect(&zero, Ordering::Acquire);
         unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
     }
 
     let _ = rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
-    let value = guard.protect(&one);
+    let value = guard.protect(&one, Ordering::Acquire);
     unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
 
     let _ = rx.recv().unwrap(); // wait for thread to drop guard

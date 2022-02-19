@@ -208,12 +208,12 @@ impl Guard<'_> {
     /// Protect the load of an atomic pointer.
     ///
     /// See [the guide](crate#protecting-pointers) for details.
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut Linked<T> {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
         if self.collector.is_null() {
             return ptr.load(Ordering::SeqCst);
         }
 
-        unsafe { (*self.collector).raw.protect(ptr) }
+        unsafe { (*self.collector).raw.protect(ptr, ordering) }
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
