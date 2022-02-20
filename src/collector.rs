@@ -244,6 +244,35 @@ impl Guard<'_> {
     pub fn collector(&self) -> Option<&Collector> {
         unsafe { self.collector.as_ref() }
     }
+
+    /// Flush any previous reservations.
+    ///
+    /// This method notifies other threads that the current thread
+    /// is no longer holding on to any protected pointers. If
+    /// the current thread holds the last reference to any
+    /// retired pointers, they will be reclaimed.
+    ///
+    /// The only difference between flushing and dropping a guard is
+    /// that the current thread stays marked as active, meaning new pointers
+    /// can be protected after a call to `flush`.
+    ///
+    /// # Safety
+    ///
+    /// This method is not marked as `unsafe`, but will affect
+    /// the validity of pointers returned by [`protect`](Guard::protect),
+    /// similar to dropping a guard. It is intended to be used safely
+    /// by users of concurrent data structures, as references will
+    /// be tied to the guard and this method takes `&mut self`.
+    ///
+    /// If this is an [`unprotected`](Guard::unprotected) guard
+    /// this method will be a no-op.
+    pub fn flush(&mut self) {
+        if self.collector.is_null() {
+            return;
+        }
+
+        unsafe { (*self.collector).raw.flush() }
+    }
 }
 
 impl Drop for Guard<'_> {

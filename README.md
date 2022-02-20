@@ -221,6 +221,16 @@ collector.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== unsound!
 ```
 
+Retirement can be delayed until the guard is dropped by calling `reclaim` on
+the guard, instead of on the collector directly:
+
+```rust,ignore
+let ptr = guard.protect(&node);
+guard.retire(ptr, |_| {});
+println!("{}", (*ptr).value); // <===== ok!
+drop(guard); // <===== ptr is invalidated!
+```
+
 #### 3. Custom Reclaimers
 
 You probably noticed that `retire` takes a function as a second parameter. This

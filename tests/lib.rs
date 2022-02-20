@@ -250,6 +250,50 @@ fn two_threads() {
 }
 
 #[test]
+fn flush() {
+    let collector = Arc::new(Collector::new().batch_size(3));
+
+    let nums = (0..10_000)
+        .map(|i| AtomicPtr::new(collector.link_boxed(i)))
+        .collect::<Arc<[_]>>();
+
+    let handles = (0..12)
+        .map(|_| {
+            std::thread::spawn({
+                let nums = nums.clone();
+                let collector = collector.clone();
+
+                move || {
+                    let mut guard = collector.enter();
+
+                    for _ in 0..100 {
+                        for n in nums.iter() {
+                            let n = guard.protect(n, Ordering::Acquire);
+                            unsafe { assert!(**n < 10_000) }
+                        }
+
+                        guard.flush();
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for i in 0..100 {
+        for n in nums.iter() {
+            let old = n.swap(collector.link_boxed(i), Ordering::Release);
+            unsafe {
+                collector.retire(old, reclaim::boxed::<usize>);
+            }
+        }
+    }
+
+    for handle in handles {
+        handle.join().unwrap()
+    }
+}
+
+#[test]
 fn collector_eq() {
     let a = Collector::new();
     let b = Collector::new();

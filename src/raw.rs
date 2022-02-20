@@ -229,6 +229,8 @@ impl Collector {
             curr = (*curr).batch.next;
         }
 
+        // Acquire/Release synchronization is needed here, similar
+        // to Arc::drop
         if (*batch.tail)
             .batch
             .ref_count
@@ -258,6 +260,23 @@ impl Collector {
         }
     }
 
+    // Decrement any reference counts, keeping the thread marked
+    // as active.
+    pub unsafe fn flush(&self) {
+        trace!("flushing guard");
+
+        let reservation = self.reservations.get_or(Default::default);
+
+        // Release: Leaving the critical section
+        // Acquire: Entering a new critical section, acquire the store of
+        // `reservation.next` in `retire`
+        let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
+
+        if head != Node::INACTIVE {
+            Collector::traverse(head)
+        }
+    }
+
     // Traverse the reservation list, decrementing the refernce
     // count of each batch.
     unsafe fn traverse(mut list: *mut Node) {
@@ -275,6 +294,9 @@ impl Collector {
             list = (*curr).reservation.next.load(Ordering::Relaxed);
 
             let tail = (*curr).batch_link;
+
+            // Acquire/Release synchronization is needed here, similar
+            // to Arc::drop
             if (*tail).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                 Collector::free_list(tail);
             }
