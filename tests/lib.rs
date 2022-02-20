@@ -9,8 +9,8 @@ use std::thread;
 #[cfg(miri)]
 mod cfg {
     pub const THREADS: usize = 4;
-    pub const ITEMS: usize = 200;
-    pub const ITER: usize = 2;
+    pub const ITEMS: usize = 250;
+    pub const ITER: usize = 5;
 }
 
 #[cfg(not(miri))]
@@ -253,11 +253,11 @@ fn two_threads() {
 fn flush() {
     let collector = Arc::new(Collector::new().batch_size(3));
 
-    let nums = (0..10_000)
+    let nums = (0..cfg::ITEMS)
         .map(|i| AtomicPtr::new(collector.link_boxed(i)))
         .collect::<Arc<[_]>>();
 
-    let handles = (0..12)
+    let handles = (0..cfg::THREADS)
         .map(|_| {
             std::thread::spawn({
                 let nums = nums.clone();
@@ -266,7 +266,7 @@ fn flush() {
                 move || {
                     let mut guard = collector.enter();
 
-                    for _ in 0..100 {
+                    for _ in 0..cfg::ITER {
                         for n in nums.iter() {
                             let n = guard.protect(n, Ordering::Acquire);
                             unsafe { assert!(**n < 10_000) }
@@ -279,17 +279,21 @@ fn flush() {
         })
         .collect::<Vec<_>>();
 
-    for i in 0..100 {
+    for i in 0..cfg::ITER {
         for n in nums.iter() {
             let old = n.swap(collector.link_boxed(i), Ordering::Release);
-            unsafe {
-                collector.retire(old, reclaim::boxed::<usize>);
-            }
+            unsafe { collector.retire(old, reclaim::boxed::<usize>) }
         }
     }
 
     for handle in handles {
         handle.join().unwrap()
+    }
+
+    // cleanup
+    for n in nums.iter() {
+        let old = n.swap(ptr::null_mut(), Ordering::Relaxed);
+        unsafe { collector.retire(old, reclaim::boxed::<usize>) }
     }
 }
 
