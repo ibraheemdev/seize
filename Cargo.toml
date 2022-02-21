@@ -14,6 +14,9 @@ num_cpus = "1.13.1"
 once_cell = "1.9.0"
 tracing = { version = "0.1.29", optional = true }
 
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.5", features = ["checkpoint"] }
+
 [features]
 default = []
 log = ["tracing"]

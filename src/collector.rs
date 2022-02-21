@@ -1,4 +1,4 @@
-use crate::raw;
+use crate::{cfg, raw};
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
@@ -372,4 +372,4 @@ impl<T> std::ops::DerefMut for Linked<T> {
 /// A linked atomic pointer.
 ///
 /// This is simply a type alias for `std::AtomicPtr<Linked<T>>`.
-pub type AtomicPtr<T> = std::sync::atomic::AtomicPtr<Linked<T>>;
+pub type AtomicPtr<T> = cfg::sync::atomic::AtomicPtr<Linked<T>>;

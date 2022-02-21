@@ -46,6 +46,25 @@ jobs:
       - run: cargo miri test
         env:
           MIRIFLAGS: "-Zmiri-tag-raw-pointers -Zmiri-disable-isolation"
+
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 2
+          LOOM_MAX_BRANCHES: 10000
+        with:
+          command: test
+          args: --test loom --release -- --nocapture
           
   doc:
     name: Docs

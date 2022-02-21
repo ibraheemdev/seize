@@ -9,11 +9,10 @@ mod thread_id;
 use thread_id::Thread;
 
 use std::cell::UnsafeCell;
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ptr;
 
-// TODO: loom doesn't expose get_mut
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use crate::cfg::sync::atomic::{AtomicBool, AtomicPtr, Ordering, WithMut};
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
@@ -29,8 +28,11 @@ struct Entry<T> {
 impl<T> Drop for Entry<T> {
     fn drop(&mut self) {
         unsafe {
-            if *self.present.get_mut() {
-                ptr::drop_in_place((*self.value.get()).as_mut_ptr());
+            let value = self.value.get();
+
+            // TODO: loom::get_mut
+            if self.present.load(Ordering::Relaxed) {
+                ptr::drop_in_place((*value).as_mut_ptr());
             }
         }
     }
@@ -61,7 +63,7 @@ where
         ThreadLocal {
             // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
             // representation as a sequence of their inner type.
-            buckets: unsafe { mem::transmute(buckets) },
+            buckets: buckets.map(AtomicPtr::new),
         }
     }
 
@@ -82,13 +84,14 @@ where
     fn get_inner(&self, thread: Thread) -> Option<&T> {
         let bucket_ptr =
             unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
+
         if bucket_ptr.is_null() {
             return None;
         }
+
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
-            // Read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
+            if entry.present.load(Ordering::Acquire) {
                 Some(&*(&*entry.value.get()).as_ptr())
             } else {
                 None
@@ -155,18 +158,21 @@ where
         let mut bucket_size = 1;
 
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
-            let bucket_ptr = *bucket.get_mut();
+            bucket.with_mut(|&mut bucket_ptr| {
+                let this_bucket_size = bucket_size;
 
-            let this_bucket_size = bucket_size;
-            if i != 0 {
-                bucket_size <<= 1;
-            }
+                if i != 0 {
+                    bucket_size <<= 1;
+                }
 
-            if bucket_ptr.is_null() {
-                continue;
-            }
+                if bucket_ptr.is_null() {
+                    return;
+                }
 
-            unsafe { Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, this_bucket_size)) };
+                unsafe {
+                    Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, this_bucket_size))
+                };
+            });
         }
     }
 }
