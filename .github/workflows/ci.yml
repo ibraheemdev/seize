@@ -60,7 +60,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         env:
           RUSTFLAGS: --cfg loom
-          LOOM_MAX_PREEMPTIONS: 2
+          LOOM_MAX_PREEMPTIONS: 1
           LOOM_MAX_BRANCHES: 10000
         with:
           command: test
