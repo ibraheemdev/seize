@@ -180,7 +180,10 @@ impl Collector {
             let head = &reservation.head as *const AtomicPtr<_> as *const AtomicUsize;
 
             // If this thread is inactive, we can skip it.
-            if (*head).load(Ordering::Acquire) as *mut Node == Node::INACTIVE {
+            //
+            // This has to be an RMW operation, because we
+            // _must_ observe any writes in enter.
+            if (*head).fetch_add(0, Ordering::Acquire) as *mut Node == Node::INACTIVE {
                 continue;
             }
 
@@ -188,7 +191,12 @@ impl Collector {
             // in the batch, we can also skip it.
             //
             // If epoch tracking is disabled this is always false (0 < 0).
-            if reservation.epoch.load(Ordering::Acquire) < (*batch.tail).reservation.min_epoch {
+            //
+            // This has to be an RMW operation, because we
+            // _must_ observe any writes in protect.
+            if reservation.epoch.fetch_add(0, Ordering::Acquire)
+                < (*batch.tail).reservation.min_epoch
+            {
                 continue;
             }
 
