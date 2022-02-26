@@ -226,7 +226,7 @@ impl Collector {
                 // Release: Make the store of `reservation.next` above visible
                 // to threads that call `leave`
                 if (*list)
-                    .compare_exchange_weak(prev, curr, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
                     active += 1;
