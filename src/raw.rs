@@ -217,10 +217,6 @@ impl Collector {
             loop {
                 let prev = (*list).load(Ordering::Acquire);
 
-                if prev == Node::INACTIVE {
-                    break;
-                }
-
                 (*curr).reservation.next.store(prev, Ordering::Relaxed);
 
                 // Release: Make the store of `reservation.next` above visible
