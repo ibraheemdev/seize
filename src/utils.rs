@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+
 /// Pads and aligns a value to the length of a cache line.
 #[cfg_attr(
     any(
@@ -46,5 +48,43 @@ impl<T> std::ops::Deref for CachePadded<T> {
 impl<T> std::ops::DerefMut for CachePadded<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
+    }
+}
+
+/// Load the latest value of an atomic variable.
+///
+/// `load_latest` loads an atomic value through an RMW
+/// as opposed to a regular load:
+///
+/// > Atomic read-modify-write operations shall always read
+/// > the last value (in the modification order) written before
+/// > the write associated with the read-modify-write operation.
+pub trait LoadLatest {
+    type Output;
+
+    fn load_latest(&self, ordering: Ordering) -> Self::Output;
+}
+
+impl LoadLatest for AtomicUsize {
+    type Output = usize;
+
+    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+        self.fetch_add(0, ordering)
+    }
+}
+
+impl LoadLatest for AtomicU64 {
+    type Output = u64;
+
+    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+        self.fetch_add(0, ordering)
+    }
+}
+
+impl<T> LoadLatest for AtomicPtr<T> {
+    type Output = *mut T;
+
+    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+        unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
     }
 }

@@ -1,6 +1,6 @@
 use crate::cfg::trace;
 use crate::tls::ThreadLocal;
-use crate::utils::CachePadded;
+use crate::utils::{CachePadded, LoadLatest};
 use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
@@ -44,28 +44,43 @@ impl Collector {
         let count = self.node_count.get_or(Default::default).get();
 
         // SAFETY: node counts are only accessed by the current thread
-        unsafe {
+        let birth_epoch = unsafe {
             *count += 1;
             trace!("allocated new value, values: {}", *count);
 
-            if let Some(ref epoch_frequency) = self.epoch_frequency {
-                if *count % epoch_frequency.get() == 0 {
+            match self.epoch_frequency {
+                Some(ref freq) if *count % freq.get() == 0 => {
                     // Advance the global epoch
                     //
-                    // Like with most counters, this can be relaxed.
-                    let _epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
-                    trace!("advancing global epoch to {}", _epoch + 1);
+                    // Like with most counter increments, this can be
+                    // relaxed. We don't care when this increment happens,
+                    // just that it eventually does.
+                    let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
+                    trace!("advancing global epoch to {}", epoch + 1);
+                    epoch
                 }
+
+                // Record the current epoch value.
+                //
+                // Note that it's fine if we see older epoch values
+                // here, because that just means more threads will
+                // be counted as active than might actually be.
+                //
+                // The only problematic case would be if a node
+                // was created with a birth_epoch *later* than the
+                // global epoch at the time it was created, as any
+                // thread loading it wouldn't record the new epoch.
+                // This is impossible as the RMW in `protect` is
+                // guaranteed to see the latest epoch epoch and
+                // therefore we cannot see a value later than it.
+                _ => self.epoch.load(Ordering::Relaxed),
             }
-        }
+        };
 
         Node {
             reclaim: |_| {},
             batch_link: ptr::null_mut(),
-            reservation: ReservationNode {
-                // Record the current epoch value.
-                birth_epoch: self.epoch.load(Ordering::Relaxed),
-            },
+            reservation: ReservationNode { birth_epoch },
             batch: BatchNode {
                 ref_count: ManuallyDrop::new(AtomicUsize::new(0)),
             },
@@ -77,8 +92,8 @@ impl Collector {
         self.reservations
             .get_or(Default::default)
             .head
-            // Acquire: entering a critical section, pointer loads
-            // must only occur *after* we mark this thread as active
+            // Acquire: pointer loads must only occur
+            // *after* we mark this thread as active.
             .swap(ptr::null_mut(), Ordering::Acquire);
     }
 
@@ -93,12 +108,20 @@ impl Collector {
         let reservation = self.reservations.get_or(Default::default);
 
         // Load the last recorded epoch.
-        let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
+        //
+        // Acquire: `ptr` must only be used *after* we
+        // check that we are in sync with the global epoch.
+        let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
 
         loop {
             let ptr = ptr.load(ordering);
 
-            let current_epoch = self.epoch.load(Ordering::Relaxed);
+            // Acquire: `ptr` must only be used *after* we
+            // check that we are in sync with the global epoch.
+            //
+            // This has to use `load_latest`, because we _must_
+            // observe any increments of the global epoch.
+            let current_epoch = self.epoch.load_latest(Ordering::Acquire);
 
             if prev_epoch == current_epoch {
                 return ptr;
@@ -109,9 +132,8 @@ impl Collector {
                     current_epoch
                 );
 
-                // Acquire: entering a critical section, pointer loads
-                // must only occur *after* we mark this thread as active
-                // in this epoch
+                // Acquire: the next load of `ptr` must only occur
+                // *after* we mark this thread as active in this epoch.
                 reservation.epoch.swap(current_epoch, Ordering::Acquire);
 
                 prev_epoch = current_epoch;
@@ -126,37 +148,53 @@ impl Collector {
     ) -> (bool, &mut Batch) {
         trace!("retiring pointer");
 
-        let batch = &mut *self.batches.get_or(Default::default).get();
+        // SAFETY: Batches are only accessed by a single thread.
+        let batch = unsafe { &mut *self.batches.get_or(Default::default).get() };
 
         let node = UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node));
 
-        (*node).reclaim = reclaim;
+        // SAFETY: `ptr` is guaranteed to be a valid linked pointer.
+        //
+        // Any other thread with a reference to it will only have an
+        // shared reference to the UnsafeCell<Node>, and the caller
+        // guarantees that the same pointer is not retired twice, so
+        // we can safely write to the node here.
+        unsafe { (*node).reclaim = reclaim }
 
         if batch.head.is_null() {
             batch.tail = node;
 
-            // if epoch tracking is disabled, set the minimum epoch of
+            // If epoch tracking is disabled, set the minimum epoch of
             // this batch epoch to 0 so that we never skip a thread while
             // retiring (reservation epochs will stay 0 as well).
             if self.epoch_frequency.is_none() {
-                (*batch.tail).reservation.min_epoch = 0;
+                // SAFETY: same as write to `node` above.
+                unsafe { (*node).reservation.min_epoch = 0 }
             }
 
-            // implicit `node.batch.ref_count = 0`
+            // Implicit `node.batch.ref_count = 0`
         } else {
             // Reuse the birth era of REFS to retain
             // the minimum birth era in the batch.
             //
             // If epoch tracking is disabled this will always be false (0 > 1).
-            if (*batch.tail).reservation.min_epoch > (*node).reservation.birth_epoch {
-                (*batch.tail).reservation.min_epoch = (*node).reservation.birth_epoch;
+            //
+            // SAFETY: We checked that batch.head != null, therefore batch.tail
+            // is a valid pointer.
+            unsafe {
+                if (*batch.tail).reservation.min_epoch > (*node).reservation.birth_epoch {
+                    (*batch.tail).reservation.min_epoch = (*node).reservation.birth_epoch;
+                }
             }
 
-            // point to REFS
-            (*node).batch_link = batch.tail;
+            // SAFETY: same as write to `node` above.
+            unsafe {
+                // The batch link of a slot node points to the tail (REFS).
+                (*node).batch_link = batch.tail;
 
-            // link to batch
-            (*node).batch.next = batch.head;
+                // Insert this node into the batch.
+                (*node).batch.next = batch.head;
+            }
         }
 
         batch.head = node;
@@ -165,38 +203,52 @@ impl Collector {
         (batch.size % self.batch_size == 0, batch)
     }
 
+    // # Safety
+    //
+    // The batch must contain at least one node.
     pub unsafe fn retire_batch(&self) {
-        self.retire(&mut *self.batches.get_or(Default::default).get());
+        // SAFETY: Guaranteed by caller
+        unsafe { self.retire(&mut *self.batches.get_or(Default::default).get()) }
     }
 
     // Attempt to retire nodes in this batch.
+    //
+    // # Safety
+    //
+    // The batch must contain at least one node.
     pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
-        (*batch.tail).batch_link = batch.head;
+        // SAFETY: Caller guarantees that the batch is not empty,
+        // so batch.tail must be valid.
+        unsafe { (*batch.tail).batch_link = batch.head }
 
         let mut last = batch.head;
         for reservation in self.reservations.iter() {
-            let head = &reservation.head as *const AtomicPtr<_> as *const AtomicUsize;
-
             // If this thread is inactive, we can skip it.
             //
-            // This has to be an RMW operation, because we
-            // _must_ observe any writes in enter.
-            if (*head).fetch_add(0, Ordering::Acquire) as *mut Node == Node::INACTIVE {
+            // This has to use `load_latest` because we _must_
+            // observe any stores in `enter`.
+            //
+            // TODO: this can probably be relaxed
+            if reservation.head.load_latest(Ordering::Acquire) == Node::INACTIVE {
                 continue;
             }
+
+            // SAFETY: The tail of a batch list is always a REFS node with
+            // `min_epoch` initialized.
+            let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
 
             // If this thread's epoch is behind all the nodes
             // in the batch, we can also skip it.
             //
             // If epoch tracking is disabled this is always false (0 < 0).
             //
-            // This has to be an RMW operation, because we
-            // _must_ observe any writes in protect.
-            if reservation.epoch.fetch_add(0, Ordering::Acquire)
-                < (*batch.tail).reservation.min_epoch
-            {
+            // This has to use `load_latest` because we _must_
+            // observe any stores in `protect`.
+            //
+            // TODO: this can probably be relaxed
+            if reservation.epoch.load_latest(Ordering::Acquire) < min_epoch {
                 continue;
             }
 
@@ -204,25 +256,38 @@ impl Collector {
                 return;
             }
 
-            (*last).reservation.head = &reservation.head;
-            last = (*last).batch.next;
+            // SAFETY: We checked that this is not the last node
+            // in the batch list above, so we can never access
+            // an invalid link.
+            unsafe {
+                (*last).reservation.head = &reservation.head;
+                last = (*last).batch.next;
+            }
         }
 
         let mut active = 0;
         let mut curr = batch.head;
 
         while curr != last {
-            let list = (*curr).reservation.head;
+            // SAFETY: All nodes in the batch are valid, and we just
+            // initialized `reservation.head` for all nodes until `last`
+            // in the loop above.
+            let head = unsafe { &*(*curr).reservation.head };
 
             loop {
-                let prev = (*list).load(Ordering::Acquire);
+                // TODO: this can probably be relaxed
+                let prev = head.load(Ordering::Acquire);
 
-                (*curr).reservation.next.store(prev, Ordering::Relaxed);
+                // This can be Relaxed because of the Acquire/Release
+                // synchronization on `head`
+                //
+                // SAFETY: All nodes in the batch are valid.
+                unsafe { (*curr).reservation.next.store(prev, Ordering::Relaxed) }
 
                 // Release: Make the store of `reservation.next` above visible
                 // to threads that call `leave`
-                if (*list)
-                    .compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Relaxed)
+                if head
+                    .compare_exchange_weak(prev, curr, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     active += 1;
@@ -230,19 +295,32 @@ impl Collector {
                 }
             }
 
-            curr = (*curr).batch.next;
+            // SAFETY: We check that we never go past the last
+            // reservation node in the loop condition.
+            curr = unsafe { (*curr).batch.next };
         }
 
-        // Acquire/Release synchronization is needed here, similar
-        // to Arc::drop
-        if (*batch.tail)
-            .batch
-            .ref_count
+        // SAFETY: The tail of a batch list is always a REFS node with
+        // `ref_count` initialized.
+        let ref_count = unsafe { &(*batch.tail).batch.ref_count };
+
+        // Release: If we do free the list here, ensure that any
+        // use of the data happens *before* it is freed. If we do
+        // not, then release any modifications to the data to
+        // the thread that will free the list.
+        //
+        // Acquire: If we free the list, acquire any modifications
+        // to the data released by the threads that decremented
+        // the count.
+        if ref_count
             .fetch_add(active, Ordering::AcqRel)
             .wrapping_add(active)
             == 0
         {
-            Collector::free_list(batch.tail);
+            // SAFETY: The reference count is 0, meaning that
+            // either no threads were active, or they all
+            // decremented the count in the time it took
+            unsafe { Collector::free_list(batch.tail) }
         }
 
         batch.head = ptr::null_mut();
@@ -255,10 +333,12 @@ impl Collector {
 
         let reservation = self.reservations.get_or(Default::default);
 
-        // Release: Leaving the critical section
-        // Acquire: Acquire the store of `reservation.next` in `retire`
+        // Release: Leaving the critical section.
+        //
+        // Acquire: Acquire the store of `reservation.next` in `retire`.
         let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
 
+        // Decrement any batch reference counts that were added.
         if head != Node::INACTIVE {
             unsafe { Collector::traverse(head) }
         }
@@ -271,23 +351,30 @@ impl Collector {
 
         let reservation = self.reservations.get_or(Default::default);
 
-        // Release: Leaving the critical section
+        // Release: Leaving the critical section.
+        //
         // Acquire: Entering a new critical section, acquire the store of
-        // `reservation.next` in `retire`
+        // `reservation.next` in `retire`.
         let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
 
+        // Decrement any batch reference counts that were added.
         if head != Node::INACTIVE {
-            Collector::traverse(head)
+            unsafe { Collector::traverse(head) }
         }
     }
 
     // Traverse the reservation list, decrementing the refernce
     // count of each batch.
+    //
+    // # Safety
+    //
+    // `list` must be a valid reservation list.
     unsafe fn traverse(mut list: *mut Node) {
         trace!("decrementing batch reference counts");
 
         loop {
             let curr = list;
+
             if curr.is_null() {
                 break;
             }
@@ -295,29 +382,60 @@ impl Collector {
             // This load can be Relaxed because any stores
             // in `retire` are made visible by the Acquire/Release
             // synchronization on `head`
-            list = (*curr).reservation.next.load(Ordering::Relaxed);
+            //
+            // SAFETY: `curr` is a valid link in the list.
+            list = unsafe { (*curr).reservation.next.load(Ordering::Relaxed) };
+            let tail = unsafe { (*curr).batch_link };
 
-            let tail = (*curr).batch_link;
-
-            // Acquire/Release synchronization is needed here, similar
-            // to Arc::drop
-            if (*tail).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                Collector::free_list(tail);
+            // Release: If we do free the list here, ensure that any
+            // use of the data happens *before* it is freed. If we do
+            // not, then release any modifications to the data to
+            // the thread that will free the list.
+            //
+            // Acquire: If we free the list, acquire any modifications
+            // to the data released by the threads that decremented
+            // the count.
+            //
+            // SAFETY: Reservation lists only comprise of SLOT nodes
+            // (not batch.tail), and the batch link of a SLOT node
+            // points to the tail of the batch, which is always a
+            // REFS node with `ref_count` initialized.
+            unsafe {
+                if (*tail).batch.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    // SAFETY: The reference count is 1, meaning that
+                    // we have the last refernce to the batch.
+                    Collector::free_list(tail)
+                }
             }
         }
     }
 
     // Free a reservation list.
+    //
+    // # Safety
+    //
+    // `list` must be the last reference to a REFS node of the batch.
+    //
+    // The reference count must be zero.
     unsafe fn free_list(list: *mut Node) {
         trace!("freeing reservation list");
 
-        let mut list = (*list).batch_link;
+        // SAFETY: list is a valid pointer.
+        let mut list = unsafe { (*list).batch_link };
 
         loop {
             let node = list;
-            list = (*node).batch.next;
-            ((*node).reclaim)(Link { node });
 
+            unsafe {
+                list = (*node).batch.next;
+                ((*node).reclaim)(Link { node });
+            }
+
+            // If `node` is the tail node (REFS), then
+            // `node.batch.next` will interpret the
+            // zero reference count in `node.batch.ref_count`
+            // as a null pointer, indicating that we have
+            // freed the last node in the list.
             if list.is_null() {
                 break;
             }
@@ -330,14 +448,29 @@ impl Drop for Collector {
         trace!("dropping collector");
 
         for batch in self.batches.iter() {
-            unsafe {
-                let batch = &mut *batch.get();
-                if !batch.head.is_null() {
+            // SAFETY: We have &mut self
+            let batch = unsafe { &mut *batch.get() };
+
+            if !batch.head.is_null() {
+                // SAFETY: batch.head is not null, meaning
+                // that batch.tail is valid.
+                unsafe {
+                    // `free_list` expects the batch link
+                    // to point to the head of the list.
+                    // Usually this is done in `retire`.
                     (*batch.tail).batch_link = batch.head;
-                    // the reference count might not be 0 (null)
+
+                    // `free_list` expects the tail node's
+                    // next link to be null. Usually this is
+                    // implied by the reference count field
+                    // in the union being zero, but that might
+                    // not be the case here, so we have to set
+                    // it manually.
                     (*batch.tail).batch.next = ptr::null_mut();
-                    Collector::free_list(batch.tail);
                 }
+
+                // SAFETY: We have &mut self.
+                unsafe { Collector::free_list(batch.tail) }
             }
         }
     }
