@@ -54,7 +54,7 @@ mod windows {
 
 #[cfg(all(feature = "fast-barrier", target_os = "linux"))]
 mod linux {
-    use crate::lazy::Lazy;
+    use once_cell::sync::Lazy;
     use core::sync::atomic::{compiler_fence, fence, Ordering};
 
     pub fn strong_barrier() {
