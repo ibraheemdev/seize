@@ -93,11 +93,11 @@ impl Collector {
         self.reservations
             .get_or(Default::default)
             .head
-            // Acquire: entering a critical section, pointer loads
-            // must only occur *after* we mark this thread as active
             .swap(ptr::null_mut(), Ordering::Relaxed);
 
-        light_barrier();
+        // Acquire: entering a critical section, pointer loads
+        // must only occur *after* we mark this thread as active
+        light_barrier(Ordering::Acquire);
     }
 
     // Protect an atomic load
@@ -336,9 +336,11 @@ impl Collector {
         trace!("marking thread as inactive");
 
         let reservation = self.reservations.get_or(Default::default);
-
         let head = reservation.head.swap(Node::INACTIVE, Ordering::Relaxed);
-        light_barrier();
+        
+        // Release: Leaving the critical section
+        // Acquire: Acquire the store of `reservation.next` in `retire`
+        light_barrier(Ordering::AcqRel);
 
         // Decrement any batch reference counts that were added.
         if head != Node::INACTIVE {

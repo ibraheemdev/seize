@@ -47,8 +47,8 @@ mod windows {
         }
     }
 
-    pub fn light_barrier() {
-        compiler_fence(Ordering::SeqCst);
+    pub fn light_barrier(ordering: Ordering) {
+        compiler_fence(ordering);
     }
 }
 
@@ -64,10 +64,10 @@ mod linux {
         }
     }
 
-    pub fn light_barrier() {
+    pub fn light_barrier(ordering: Ordering) {
         match STRATEGY.get() {
-            Strategy::Membarrier => compiler_fence(Ordering::SeqCst),
-            Strategy::Fallback => fence(Ordering::SeqCst),
+            Strategy::Membarrier => compiler_fence(ordering),
+            Strategy::Fallback => fence(ordering),
         }
     }
 
@@ -186,8 +186,8 @@ mod macos {
         }
     }
 
-    pub fn light_barrier() {
-        compiler_fence(Ordering::SeqCst);
+    pub fn light_barrier(ordering: Ordering) {
+        compiler_fence(ordering);
     }
 }
 
@@ -208,44 +208,5 @@ mod fallback {
 
     pub fn light_barrier() {
         fence(Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{light_barrier, strong_barrier};
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
-    #[test]
-    fn mixed_test() {
-        const ITER: usize = 10000;
-        const DIV_BY_STRONG: usize = 2;
-        const THREADS: [usize; 6] = [2, 4, 8, 16, 32, 64];
-
-        for threads in &THREADS {
-            let barrier = Arc::new(Barrier::new(threads + 1));
-
-            for _ in 0..*threads {
-                let barrier = Arc::clone(&barrier);
-
-                thread::spawn(move || {
-                    barrier.wait();
-
-                    for i in 0..ITER {
-                        if i % DIV_BY_STRONG == 0 {
-                            strong_barrier();
-                        } else {
-                            light_barrier();
-                        }
-                    }
-
-                    barrier.wait();
-                });
-            }
-
-            barrier.wait();
-            barrier.wait();
-        }
     }
 }
