@@ -3,12 +3,12 @@ use crate::tls::ThreadLocal;
 use crate::utils::{CachePadded, LoadLatest};
 use crate::{Link, Linked};
 
+use crate::barrier::{light_barrier, strong_barrier};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use crate::barrier::{light_barrier, strong_barrier};
 
 // Fast, lock-free, robust concurrent memory reclamation.
 //
@@ -337,7 +337,7 @@ impl Collector {
 
         let reservation = self.reservations.get_or(Default::default);
         let head = reservation.head.swap(Node::INACTIVE, Ordering::Relaxed);
-        
+
         // Release: Leaving the critical section
         // Acquire: Acquire the store of `reservation.next` in `retire`
         light_barrier(Ordering::AcqRel);

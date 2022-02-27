@@ -1,12 +1,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 
+mod barrier;
 mod cfg;
 mod collector;
 mod raw;
 mod tls;
 mod utils;
-mod barrier;
 
 pub mod reclaim;
 

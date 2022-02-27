@@ -160,19 +160,21 @@ mod macos {
         let mut dummy_ptr = DUMMY_PAGE.lock().unwrap();
 
         if dummy_ptr.0.is_null() {
-            let new_ptr = libc::mmap(
-                null_mut(),
-                1,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            );
+            unsafe {
+                let new_ptr = libc::mmap(
+                    null_mut(),
+                    1,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
 
-            assert!(new_ptr != libc::MAP_FAILED);
-            assert!(libc::mlock(new_ptr, 1) >= 0);
+                assert!(new_ptr != libc::MAP_FAILED);
+                assert!(libc::mlock(new_ptr, 1) >= 0);
 
-            *dummy_ptr = Ptr(new_ptr);
+                *dummy_ptr = Ptr(new_ptr);
+            }
         }
 
         dummy_ptr
