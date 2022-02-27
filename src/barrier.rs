@@ -58,19 +58,20 @@ mod linux {
     use core::sync::atomic::{compiler_fence, fence, Ordering};
 
     pub fn strong_barrier() {
-        match STRATEGY.get() {
+        match *STRATEGY {
             Strategy::Membarrier => membarrier::barrier(),
             Strategy::Fallback => fence(Ordering::SeqCst),
         }
     }
 
     pub fn light_barrier(ordering: Ordering) {
-        match STRATEGY.get() {
+        match *STRATEGY {
             Strategy::Membarrier => compiler_fence(ordering),
             Strategy::Fallback => fence(ordering),
         }
     }
 
+    #[derive(Clone, Copy)]
     enum Strategy {
         Membarrier,
         Fallback,
