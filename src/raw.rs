@@ -8,6 +8,7 @@ use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use crate::barrier::{light_barrier, strong_barrier};
 
 // Fast, lock-free, robust concurrent memory reclamation.
 //
@@ -92,9 +93,11 @@ impl Collector {
         self.reservations
             .get_or(Default::default)
             .head
-            // Acquire: pointer loads must only occur
-            // *after* we mark this thread as active.
-            .swap(ptr::null_mut(), Ordering::Acquire);
+            // Acquire: entering a critical section, pointer loads
+            // must only occur *after* we mark this thread as active
+            .swap(ptr::null_mut(), Ordering::Relaxed);
+
+        light_barrier();
     }
 
     // Protect an atomic load
@@ -218,6 +221,7 @@ impl Collector {
     // The batch must contain at least one node.
     pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
+        strong_barrier();
 
         // SAFETY: Caller guarantees that the batch is not empty,
         // so batch.tail must be valid.
@@ -333,10 +337,8 @@ impl Collector {
 
         let reservation = self.reservations.get_or(Default::default);
 
-        // Release: Leaving the critical section.
-        //
-        // Acquire: Acquire the store of `reservation.next` in `retire`.
-        let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
+        let head = reservation.head.swap(Node::INACTIVE, Ordering::Relaxed);
+        light_barrier();
 
         // Decrement any batch reference counts that were added.
         if head != Node::INACTIVE {

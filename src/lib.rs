@@ -6,6 +6,7 @@ mod collector;
 mod raw;
 mod tls;
 mod utils;
+mod barrier;
 
 pub mod reclaim;
 
