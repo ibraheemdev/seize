@@ -120,10 +120,12 @@ impl Collector {
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
-        let (should_retire, batch) = self.raw.delayed_retire(ptr, reclaim);
+        unsafe {
+            let (should_retire, batch) = self.raw.delayed_retire(ptr, reclaim);
 
-        if should_retire {
-            self.raw.retire(batch);
+            if should_retire {
+                self.raw.retire(batch);
+            }
         }
     }
 
@@ -227,11 +229,13 @@ impl Guard<'_> {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         if self.collector.is_null() {
-            return (reclaim)(Link { node: ptr as _ });
+            return unsafe { (reclaim)(Link { node: ptr as _ }) };
         }
 
-        let (should_retire, _) = (*self.collector).raw.delayed_retire(ptr, reclaim);
-        *self.should_retire.get() |= should_retire;
+        unsafe {
+            let (should_retire, _) = (*self.collector).raw.delayed_retire(ptr, reclaim);
+            *self.should_retire.get() |= should_retire;
+        }
     }
 
     /// Get a reference to the collector this guard we created from.

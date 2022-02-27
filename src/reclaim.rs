@@ -19,7 +19,9 @@ use crate::Link;
 /// the link passed must have been created from a **valid**
 /// `Linked<T>`.
 pub unsafe fn boxed<T>(mut link: Link) {
-    let _ = Box::from_raw(link.cast::<T>());
+    unsafe {
+        let _ = Box::from_raw(link.cast::<T>());
+    }
 }
 
 /// Reclaims memory by dropping the value in place.
@@ -33,5 +35,7 @@ pub unsafe fn boxed<T>(mut link: Link) {
 /// the link passed must have been created from a **valid**
 /// `Linked<T>`.
 pub unsafe fn in_place<T>(mut link: Link) {
-    let _ = ptr::drop_in_place(link.cast::<T>());
+    unsafe {
+        let _ = ptr::drop_in_place(link.cast::<T>());
+    }
 }
