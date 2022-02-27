@@ -196,11 +196,15 @@ where
         // bucket, and we would yield that instead of an
         // active thread that actually needs to participate
         // in reference counting. Yielding extra values is
-        // fine, but not yielding all currently active
+        // fine, but not yielding all originally active
         // threads is not.
         while self.bucket < BUCKETS {
-            let bucket = unsafe { self.thread_local.buckets.get_unchecked(self.bucket) };
-            let bucket = bucket.load(Ordering::Acquire);
+            let bucket = unsafe {
+                self.thread_local
+                    .buckets
+                    .get_unchecked(self.bucket)
+                    .load(Ordering::Acquire)
+            };
 
             if !bucket.is_null() {
                 while self.index < self.bucket_size {

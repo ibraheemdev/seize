@@ -40,6 +40,7 @@ impl Collector {
     }
 
     // Create a new node, storing the current epoch value.
+    #[allow(clippy::let_and_return)] // cfg::trace
     pub fn node(&self) -> Node {
         let count = self.node_count.get_or(Default::default).get();
 
