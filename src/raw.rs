@@ -1,6 +1,6 @@
 use crate::cfg::trace;
 use crate::tls::ThreadLocal;
-use crate::utils::{CachePadded, LoadLatest};
+use crate::utils::{CachePadded, Rdmw};
 use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
@@ -120,9 +120,9 @@ impl Collector {
             // Acquire: `ptr` must only be used *after* we
             // check that we are in sync with the global epoch.
             //
-            // This has to use `load_latest`, because we _must_
-            // observe any increments of the global epoch.
-            let current_epoch = self.epoch.load_latest(Ordering::Acquire);
+            // This has to use `load_rdmw` in order to synchronize
+            // with increments of the global epoch.
+            let current_epoch = self.epoch.load_rdmw(Ordering::Acquire);
 
             if prev_epoch == current_epoch {
                 return ptr;
@@ -228,11 +228,11 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // If this thread is inactive, we can skip it.
             //
-            // This has to use `load_latest` because we _must_
-            // observe any stores in `enter`.
+            // This has to use `load_rdmw` in order to synchronize
+            // with stores in `enter`.
             //
             // TODO: this can probably be relaxed
-            if reservation.head.load_latest(Ordering::Acquire) == Node::INACTIVE {
+            if reservation.head.load_rdmw(Ordering::Acquire) == Node::INACTIVE {
                 continue;
             }
 
@@ -245,11 +245,11 @@ impl Collector {
             //
             // If epoch tracking is disabled this is always false (0 < 0).
             //
-            // This has to use `load_latest` because we _must_
-            // observe any stores in `protect`.
+            // This has to use `load_rdmw` in order to synchronize
+            // with stores in `protect`.
             //
             // TODO: this can probably be relaxed
-            if reservation.epoch.load_latest(Ordering::Acquire) < min_epoch {
+            if reservation.epoch.load_rdmw(Ordering::Acquire) < min_epoch {
                 continue;
             }
 

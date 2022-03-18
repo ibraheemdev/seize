@@ -51,40 +51,40 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
     }
 }
 
-/// Load the latest value of an atomic variable.
+/// Load-dont-modify-write
 ///
-/// `load_latest` loads an atomic value through an RMW
+/// `load_rmdw` loads an atomic value through an RMW
 /// as opposed to a regular load:
 ///
 /// > Atomic read-modify-write operations shall always read
 /// > the last value (in the modification order) written before
 /// > the write associated with the read-modify-write operation.
-pub trait LoadLatest {
+pub trait Rdmw {
     type Output;
 
-    fn load_latest(&self, ordering: Ordering) -> Self::Output;
+    fn load_rdmw(&self, ordering: Ordering) -> Self::Output;
 }
 
-impl LoadLatest for AtomicUsize {
+impl Rdmw for AtomicUsize {
     type Output = usize;
 
-    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
         self.fetch_add(0, ordering)
     }
 }
 
-impl LoadLatest for AtomicU64 {
+impl Rdmw for AtomicU64 {
     type Output = u64;
 
-    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
         self.fetch_add(0, ordering)
     }
 }
 
-impl<T> LoadLatest for AtomicPtr<T> {
+impl<T> Rdmw for AtomicPtr<T> {
     type Output = *mut T;
 
-    fn load_latest(&self, ordering: Ordering) -> Self::Output {
+    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
         unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
     }
 }
