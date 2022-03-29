@@ -10,13 +10,13 @@ Fast, efficient, and robust memory reclamation for concurrent data structures.
 
 Concurrent data structures are faced with the problem of deciding when it is
 safe to free memory. Although an object might have been logically removed, other
-threads that previously loaded it may still have access to it, and thus it is
+threads that previously loaded it may still be accessing it, and thus it is
 not safe to free immediately. Over the years, many algorithms have been devised
 to solve this problem. However, most traditional memory reclamation schemes make
 the tradeoff between performance, efficiency, and robustness. For example,
-[Epoch Based Reclamation] is fast and lightweight but lacks robustness in that a
+[epoch based reclamation] is fast and lightweight but lacks robustness in that a
 stalled thread can prevent the reclamation of _all_ retired objects. [Hazard
-Pointers], another popular scheme, tracks individual pointers, making it efficient
+pointers], another popular scheme, tracks individual pointers, making it efficient
 and robust but generally much slower.
 
 Another problem that is often not considered is workload balancing. In most
@@ -28,16 +28,17 @@ asynchronous runtimes like [Tokio].
 
 # Details
 
-Seize is based on the [Hyaline reclamation scheme]. It uses reference counting
-to determine when it is safe to free memory. However, counters are only used per
-batch of _retired_ objects, allowing it to avoid the high overhead incurred by
-traditional reference counting schemes. Performance is typically on par or
-better than epoch based schemes, while memory efficiency is similar to hazard
-pointers. Reclamation is naturally balanced as the thread with the last
-reference to a batch is the one that frees memory. Epochs are also tracked to
-protect against stalled threads, making reclamation truly lock-free.
+Seize is based on the [hyaline reclamation scheme], which uses reference counting
+to determine when it is safe to free memory. However, reference counters are only
+used for objects that have been retired, allowing it to avoid the high overhead
+incurred by traditional reference counting schemes where every memory access requires
+modifying shared memory. Performance is typically on par with or better than epoch based
+schemes, while memory efficiency is similar to hazard pointers. Reclamation is naturally
+balanced as the thread with the last reference to an object is the one that frees it.
+Epochs are also tracked to protect against stalled threads, making reclamation truly
+lock-free.
 
-Seize is compatible with all modern hardware that supports common atomic
+Seize is compatible with all modern hardware that supports single-word atomic
 operations such as FAA and CAS.
 
 # Guide
