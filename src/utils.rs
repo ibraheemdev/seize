@@ -51,9 +51,9 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
     }
 }
 
-/// Load-dont-modify-write
+/// Read-dont-modify-write
 ///
-/// `load_rmdw` loads an atomic value through an RMW
+/// `rmdw` loads an atomic value through an RMW
 /// as opposed to a regular load:
 ///
 /// > Atomic read-modify-write operations shall always read
@@ -62,13 +62,13 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
 pub trait Rdmw {
     type Output;
 
-    fn load_rdmw(&self, ordering: Ordering) -> Self::Output;
+    fn rdmw(&self, ordering: Ordering) -> Self::Output;
 }
 
 impl Rdmw for AtomicUsize {
     type Output = usize;
 
-    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
+    fn rdmw(&self, ordering: Ordering) -> Self::Output {
         self.fetch_add(0, ordering)
     }
 }
@@ -76,7 +76,7 @@ impl Rdmw for AtomicUsize {
 impl Rdmw for AtomicU64 {
     type Output = u64;
 
-    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
+    fn rdmw(&self, ordering: Ordering) -> Self::Output {
         self.fetch_add(0, ordering)
     }
 }
@@ -84,7 +84,9 @@ impl Rdmw for AtomicU64 {
 impl<T> Rdmw for AtomicPtr<T> {
     type Output = *mut T;
 
-    fn load_rdmw(&self, ordering: Ordering) -> Self::Output {
+    fn rdmw(&self, ordering: Ordering) -> Self::Output {
+        // The int2ptr cast here is sketchy, but we never actually dereference it,
+        // it's only used it for comparisons against `INACTIVE`.
         unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
     }
 }

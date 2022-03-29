@@ -120,9 +120,11 @@ impl Collector {
             // Acquire: `ptr` must only be used *after* we
             // check that we are in sync with the global epoch.
             //
-            // This has to use `load_rdmw` in order to synchronize
-            // with increments of the global epoch.
-            let current_epoch = self.epoch.load_rdmw(Ordering::Acquire);
+            // `rdmw` is required in order to maintain a total
+            // order between the load here and increments of the
+            // global epoch. Reading a stale value could cause
+            // other threads to think we are stalled.
+            let current_epoch = self.epoch.rdmw(Ordering::Acquire);
 
             if prev_epoch == current_epoch {
                 return ptr;
@@ -228,11 +230,13 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // If this thread is inactive, we can skip it.
             //
-            // This has to use `load_rdmw` in order to synchronize
-            // with stores in `enter`.
+            // `rdmw` is required in order to maintain a total
+            // order between the check here and stores in `enter`.
+            // Reading a stale value could cause us to skip active
+            // threads.
             //
             // TODO: this can probably be relaxed
-            if reservation.head.load_rdmw(Ordering::Acquire) == Node::INACTIVE {
+            if reservation.head.rdmw(Ordering::Acquire) == Node::INACTIVE {
                 continue;
             }
 
@@ -240,16 +244,18 @@ impl Collector {
             // `min_epoch` initialized.
             let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
 
-            // If this thread's epoch is behind all the nodes
-            // in the batch, we can also skip it.
+            // If this thread's epoch is behind all the nodes in the batch,
+            // we can also skip it.
             //
             // If epoch tracking is disabled this is always false (0 < 0).
             //
-            // This has to use `load_rdmw` in order to synchronize
-            // with stores in `protect`.
+            // `rdmw` is required in order to maintain a total
+            // order between the check here and stores in `enter`.
+            // Reading a stale value could cause us to skip active
+            // threads.
             //
             // TODO: this can probably be relaxed
-            if reservation.epoch.load_rdmw(Ordering::Acquire) < min_epoch {
+            if reservation.epoch.rdmw(Ordering::Acquire) < min_epoch {
                 continue;
             }
 
