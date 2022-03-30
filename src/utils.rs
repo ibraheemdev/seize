@@ -51,7 +51,7 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
     }
 }
 
-/// Read-dont-modify-write
+/// Read-don't-modify-write
 ///
 /// `rmdw` loads an atomic value through an RMW
 /// as opposed to a regular load:
@@ -59,6 +59,8 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
 /// > Atomic read-modify-write operations shall always read
 /// > the last value (in the modification order) written before
 /// > the write associated with the read-modify-write operation.
+///
+/// This also allows loads with `Release` semantics.
 pub trait Rdmw {
     type Output;
 
@@ -85,8 +87,9 @@ impl<T> Rdmw for AtomicPtr<T> {
     type Output = *mut T;
 
     fn rdmw(&self, ordering: Ordering) -> Self::Output {
-        // The int2ptr cast here is sketchy, but we never actually dereference it,
-        // it's only used it for comparisons against `INACTIVE`.
+        // the int2ptr cast here is sketchy, but we never
+        // actually dereference the pointer, it's only used
+        // for comparisons.
         unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
     }
 }

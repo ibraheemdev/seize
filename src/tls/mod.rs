@@ -59,8 +59,7 @@ where
         }
 
         ThreadLocal {
-            // Safety: AtomicPtr has the same representation as a pointer and arrays have the same
-            // representation as a sequence of their inner type.
+            // safety: `AtomicPtr` has the same representation as a pointer
             buckets: unsafe { mem::transmute(buckets) },
         }
     }
@@ -87,7 +86,7 @@ where
         }
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
-            // Read without atomic operations as only this thread can set the value.
+            // read without atomic operations as only this thread can set the value.
             if (&entry.present as *const _ as *const bool).read() {
                 Some(&*(&*entry.value.get()).as_ptr())
             } else {
@@ -102,7 +101,7 @@ where
 
         let bucket_ptr: *const _ = bucket.load(Ordering::Acquire);
 
-        // If the bucket doesn't already exist, we need to allocate it
+        // if the bucket doesn't already exist, we need to allocate it
         let bucket_ptr = if bucket_ptr.is_null() {
             let new_bucket = allocate_bucket(thread.bucket_size);
 
@@ -113,7 +112,7 @@ where
                 Ordering::Acquire,
             ) {
                 Ok(_) => new_bucket,
-                // If the bucket value changed (from null), that means
+                // if the bucket value changed (from null), that means
                 // another thread stored a new bucket before we could,
                 // and we can free our bucket and use that one instead
                 Err(bucket_ptr) => {
@@ -128,7 +127,7 @@ where
             bucket_ptr
         };
 
-        // Insert the new element into the bucket
+        // insert the new element into the bucket
         let entry = unsafe { &*bucket_ptr.add(thread.index) };
         let value_ptr = entry.value.get();
         unsafe { value_ptr.write(MaybeUninit::new(data)) };
@@ -188,14 +187,14 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // We have to check all the buckets here
-        // because we reuse thread IDs. Keeping track
+        // we have to check all the buckets here
+        // because we reuse thread IDs. keeping track
         // of the number of values and only yielding
         // that many here wouldn't work, because a new
         // thread could join and be inserted into a middle
         // bucket, and we would yield that instead of an
         // active thread that actually needs to participate
-        // in reference counting. Yielding extra values is
+        // in reference counting. yielding extra values is
         // fine, but not yielding all originally active
         // threads is not.
         while self.bucket < BUCKETS {

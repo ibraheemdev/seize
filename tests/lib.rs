@@ -78,7 +78,7 @@ fn stress() {
 
                 if self
                     .head
-                    .compare_exchange(head, next, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange(head, next, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
                 {
                     unsafe {
@@ -292,7 +292,7 @@ fn flush() {
 
     // cleanup
     for n in nums.iter() {
-        let old = n.swap(ptr::null_mut(), Ordering::Relaxed);
+        let old = n.swap(ptr::null_mut(), Ordering::Acquire);
         unsafe { collector.retire(old, reclaim::boxed::<usize>) }
     }
 }

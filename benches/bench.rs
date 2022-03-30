@@ -159,7 +159,7 @@ mod seize_stack {
 
                         if self
                             .head
-                            .compare_exchange(head, next, Ordering::Relaxed, Ordering::Relaxed)
+                            .compare_exchange(head, next, Ordering::AcqRel, Ordering::Relaxed)
                             .is_ok()
                         {
                             unsafe {
