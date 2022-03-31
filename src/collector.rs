@@ -212,7 +212,7 @@ impl Guard<'_> {
     /// See [the guide](crate#protecting-pointers) for details.
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
         if self.collector.is_null() {
-            return ptr.load(Ordering::SeqCst);
+            return ptr.load(ordering);
         }
 
         unsafe { (*self.collector).raw.protect(ptr, ordering) }
