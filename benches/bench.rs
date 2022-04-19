@@ -134,7 +134,7 @@ mod seize_stack {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
+                let head = guard.protect(&self.head);
                 unsafe { (*n).next.store(head, Ordering::Relaxed) }
 
                 if self
@@ -151,11 +151,11 @@ mod seize_stack {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
+                let head = guard.protect(&self.head);
 
                 match unsafe { head.as_ref() } {
                     Some(h) => {
-                        let next = guard.protect(&h.next, Ordering::Acquire);
+                        let next = guard.protect(&h.next);
 
                         if self
                             .head
@@ -176,7 +176,7 @@ mod seize_stack {
 
         pub fn is_empty(&self) -> bool {
             let guard = self.collector.enter();
-            guard.protect(&self.head, Ordering::Acquire).is_null()
+            guard.protect(&self.head).is_null()
         }
     }
 

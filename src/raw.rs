@@ -54,8 +54,7 @@ impl Collector {
                     // advance the global epoch
                     //
                     // like with most counter increments, this can be
-                    // relaxed. we don't care when this increment happens,
-                    // just that it eventually does
+                    // relaxed
                     let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
                     trace!("advancing global epoch to {}", epoch + 1);
                     epoch
@@ -101,12 +100,12 @@ impl Collector {
     }
 
     // Protect an atomic load
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut T {
         trace!("protecting pointer");
 
         if self.epoch_frequency.is_none() {
             // epoch tracking is disabled
-            return ptr.load(ordering);
+            return ptr.load(Ordering::Acquire);
         }
 
         let reservation = self.reservations.get_or(Default::default);
@@ -118,15 +117,13 @@ impl Collector {
         let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
         loop {
-            let ptr = ptr.load(ordering);
+            let ptr = ptr.load(Ordering::Acquire);
 
-            // release: ensure that we load `ptr` before
-            // checking the global epoch (#LoadStore)
-            //
-            // rdmw: maintain a total order between the load here
-            // and increments of the global epoch - reading a stale
-            // value could cause other threads to think we are stalled
-            let current_epoch = self.epoch.rdmw(Ordering::Release);
+            // relaxed: we acquired at least the pointer's
+            // birth epoch above. we need to record that or
+            // anything later to let other threads know that
+            // we can still access the pointer
+            let current_epoch = self.epoch.load(Ordering::Relaxed);
 
             if prev_epoch == current_epoch {
                 return ptr;
@@ -236,11 +233,10 @@ impl Collector {
             // here and stores in `enter` - reading a stale value
             // could cause us to skip active threads
             //
-            // relaxed: as long as this thread was inactive any
-            // time after the pointers in this batch were made
-            // unreachable, we can safely skip it. unreachability
-            // (`swap(Acquire)`) is guaranteed by callers of
-            // `delayed_retire`
+            // relaxed: the `swap(Acquire)` that made the pointer
+            // unreachable acts as a #StoreLoad fence. as long as
+            // this thread was inactive any time after the pointers
+            // in this batch were made unreachable, we can safely skip it.
             if reservation.head.rdmw(Ordering::Relaxed) == Node::INACTIVE {
                 continue;
             }
@@ -285,8 +281,7 @@ impl Collector {
             loop {
                 let prev = head.load(Ordering::Acquire);
 
-                // relaxed: acq/rel synchronization is provided
-                // by `head`
+                // relaxed: acq/rel synchronization is provided by `head`
                 unsafe { (*curr).reservation.next.store(prev, Ordering::Relaxed) }
 
                 // release: release the new reservation nodes
