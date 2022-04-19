@@ -192,7 +192,7 @@ impl Guard<'_> {
     ///
     /// Unprotected guards are useful when calling guarded functions
     /// on a data structure that has just been created or is about
-    /// to be destroyed, because you know that know other thread holds
+    /// to be destroyed, because you know that no other thread holds
     /// a reference to it.
     ///
     /// # Safety
