@@ -224,7 +224,7 @@ collector.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== unsound!
 ```
 
-Retirement can be delayed until the guard is dropped by calling `reclaim` on
+Retirement can be delayed until the guard is dropped by calling `retire` on
 the guard, instead of on the collector directly:
 
 ```rust,ignore
@@ -264,7 +264,7 @@ losing any information. To extract the underlying value from a link, you can
 call the `cast` method.
 
 ```rust,ignore
-collector.reclaim(value, |link: Link| unsafe {
+collector.retire(value, |link: Link| unsafe {
     // SAFETY: the value passed to reclaim was of type
     // `*mut Linked<Value>`
     let ptr: *mut Linked<Value> = link.cast::<Value>();
