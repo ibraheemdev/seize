@@ -265,7 +265,7 @@ call the `cast` method.
 
 ```rust,ignore
 collector.retire(value, |link: Link| unsafe {
-    // SAFETY: the value passed to reclaim was of type
+    // SAFETY: the value passed to retire was of type
     // `*mut Linked<Value>`
     let ptr: *mut Linked<Value> = link.cast::<Value>();
 
