@@ -1,6 +1,6 @@
 use crate::cfg::trace;
 use crate::tls::ThreadLocal;
-use crate::utils::{CachePadded, Rdmw};
+use crate::utils::{CachePadded, NoDropGlue, Rdmw, Zeroable};
 use crate::{Link, Linked};
 
 use std::cell::UnsafeCell;
@@ -42,7 +42,7 @@ impl Collector {
     // Create a new node, storing the current epoch value
     #[allow(clippy::let_and_return)] // cfg::trace
     pub fn node(&self) -> Node {
-        let count = self.node_count.get_or(Default::default).get();
+        let count = self.node_count.load_or_zeroed().get();
 
         // safety: node counts are only accessed by the current thread
         let birth_epoch = unsafe {
@@ -90,13 +90,13 @@ impl Collector {
     // Mark the current thread as active
     pub fn enter(&self) {
         self.reservations
-            .get_or(Default::default)
+            .load_or_zeroed()
             .head
             // acquire: enter the critical section
             //
             // pointer loads must only occur after
             // we mark this thread as active
-            .swap(ptr::null_mut(), Ordering::Acquire);
+            .swap(Node::ACTIVE, Ordering::Acquire);
     }
 
     // Protect an atomic load
@@ -108,7 +108,7 @@ impl Collector {
             return ptr.load(Ordering::Acquire);
         }
 
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load_or_zeroed();
 
         // load the last recorded epoch
         //
@@ -153,7 +153,7 @@ impl Collector {
         trace!("retiring pointer");
 
         // safety: batches are only accessed by the current thread
-        let batch = unsafe { &mut *self.batches.get_or(Default::default).get() };
+        let batch = unsafe { &mut *self.batches.load_or_zeroed().get() };
 
         let node = UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node));
 
@@ -210,7 +210,7 @@ impl Collector {
     // The batch must contain at least one node
     pub unsafe fn retire_batch(&self) {
         // safety: guaranteed by caller
-        unsafe { self.retire(&mut *self.batches.get_or(Default::default).get()) }
+        unsafe { self.retire(&mut *self.batches.load_or_zeroed().get()) }
     }
 
     // Attempt to retire nodes in this batch
@@ -221,13 +221,20 @@ impl Collector {
     pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
+        // not enough nodes to insert into thread reservation lists
+        if batch.size <= self.reservations.entries() {
+            return;
+        }
+
         // safety: caller guarantees that the batch is not empty,
         // so batch.tail must be valid
         unsafe { (*batch.tail).batch_link = batch.head }
 
-        let mut last = batch.head;
+        let mut active = 0;
+        let mut curr = batch.head;
+
         for reservation in self.reservations.iter() {
-            // if this thread is inactive, we can skip it
+            // if this thread is inactive, we can safely skip it
             //
             // rdmw: maintain a total order between the check
             // here and stores in `enter` - reading a stale value
@@ -254,38 +261,15 @@ impl Collector {
                 continue;
             }
 
-            // we don't have enough nodes to insert into the active
-            // threads reservation lists, try again later
-            if last == batch.tail {
-                return;
-            }
-
-            // safety: we checked that this is not the last node
-            // in the batch list above, so we can never access
-            // an invalid link
-            unsafe {
-                (*last).reservation.head = &reservation.head;
-                last = (*last).batch.next;
-            }
-        }
-
-        let mut active = 0;
-        let mut curr = batch.head;
-
-        while curr != last {
-            // safety: all nodes in the batch are valid, and we just
-            // initialized `reservation.head` for all nodes until `last`
-            // in the loop above
-            let head = unsafe { &*(*curr).reservation.head };
-
             loop {
-                let prev = head.load(Ordering::Acquire);
+                let prev = reservation.head.load(Ordering::Acquire);
 
                 // relaxed: acq/rel synchronization is provided by `head`
                 unsafe { (*curr).reservation.next.store(prev, Ordering::Relaxed) }
 
                 // release: release the new reservation nodes
-                if head
+                if reservation
+                    .head
                     .compare_exchange_weak(prev, curr, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
@@ -326,14 +310,16 @@ impl Collector {
     pub fn leave(&self) {
         trace!("marking thread as inactive");
 
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load_or_zeroed();
 
         // release: exit the critical section
         // acquire: acquire any new reservation nodes
         let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
 
-        if head != Node::INACTIVE {
-            // decrement any batch reference counts that were added
+        if head != Node::ACTIVE {
+            // if the reservation list is not empty
+            // we need to decrement any batch reference
+            // counts
             unsafe { Collector::traverse(head) }
         }
     }
@@ -343,14 +329,16 @@ impl Collector {
     pub unsafe fn flush(&self) {
         trace!("flushing guard");
 
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load_or_zeroed();
 
         // release: exit the critical section
         // acquire: acquire any new reservation nodes
-        let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
+        let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
 
-        if head != Node::INACTIVE {
-            // decrement any batch reference counts that were added
+        if head != Node::ACTIVE {
+            // if the reservation list is not empty
+            // we need to decrement any batch reference
+            // counts
             unsafe { Collector::traverse(head) }
         }
     }
@@ -367,7 +355,7 @@ impl Collector {
         loop {
             let curr = list;
 
-            if curr.is_null() {
+            if curr.is_null() || curr == Node::ACTIVE {
                 break;
             }
 
@@ -504,12 +492,12 @@ union BatchNode {
 }
 
 impl Node {
+    // Represents a thread that is active with an
+    // empty reservation list.
+    pub const ACTIVE: *mut Node = !0_usize as _;
+
     // Represents an inactive thread
-    //
-    // While null indicates an empty list, INACTIVE
-    // indicates the thread is not performing
-    // an operation on the datastructure
-    pub const INACTIVE: *mut Node = -1_isize as usize as _;
+    pub const INACTIVE: *mut Node = ptr::null_mut();
 }
 
 // A per-thread reservation list
@@ -531,6 +519,9 @@ impl Default for Reservation {
     }
 }
 
+unsafe impl Zeroable for Reservation {}
+impl NoDropGlue for Reservation {}
+
 // A batch of nodes waiting to be retired
 pub struct Batch {
     // Head the batch
@@ -550,6 +541,9 @@ impl Default for Batch {
         }
     }
 }
+
+unsafe impl Zeroable for Batch {}
+impl NoDropGlue for Batch {}
 
 unsafe impl Send for Batch {}
 unsafe impl Sync for Batch {}

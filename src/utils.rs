@@ -1,3 +1,6 @@
+use std::alloc::{self, Layout};
+use std::cell::UnsafeCell;
+use std::slice;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 /// Pads and aligns a value to the length of a cache line.
@@ -51,6 +54,9 @@ impl<T> std::ops::DerefMut for CachePadded<T> {
     }
 }
 
+unsafe impl<T: Zeroable> Zeroable for CachePadded<T> {}
+impl<T: NoDropGlue> NoDropGlue for CachePadded<T> {}
+
 /// Read-don't-modify-write
 ///
 /// `rmdw` loads an atomic value through an RMW
@@ -92,4 +98,30 @@ impl<T> Rdmw for AtomicPtr<T> {
         // for comparisons.
         unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
     }
+}
+
+// # Safety
+//
+// Same as mem::zeroed::<T>().
+#[allow(clippy::missing_safety_doc)] // false positive?
+pub unsafe trait Zeroable {}
+
+// A type that requires no drop glue
+pub trait NoDropGlue {}
+
+unsafe impl<T: Zeroable> Zeroable for UnsafeCell<T> {}
+unsafe impl Zeroable for u64 {}
+
+impl<T: NoDropGlue> NoDropGlue for UnsafeCell<T> {}
+impl NoDropGlue for u64 {}
+
+pub fn alloc_zeroed_slice<T: Zeroable>(len: usize) -> Box<[T]> {
+    let layout = Layout::array::<T>(len).unwrap();
+    let ptr = unsafe { alloc::alloc_zeroed(layout) } as *mut T;
+
+    if ptr.is_null() {
+        alloc::handle_alloc_error(layout);
+    }
+
+    unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr, len) as _) }
 }
