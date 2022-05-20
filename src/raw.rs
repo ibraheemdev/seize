@@ -3,7 +3,7 @@ use crate::tls::ThreadLocal;
 use crate::utils::{CachePadded, Rdmw};
 use crate::{Link, Linked};
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::ptr;
@@ -89,14 +89,62 @@ impl Collector {
 
     // Mark the current thread as active
     pub fn enter(&self) {
-        self.reservations
-            .get_or(Default::default)
-            .head
-            // acquire: enter the critical section
-            //
-            // pointer loads must only occur after
-            // we mark this thread as active
-            .swap(ptr::null_mut(), Ordering::Acquire);
+        let reservation = self.reservations.get_or(Default::default);
+
+        let guards = reservation.guards.get();
+        reservation.guards.set(guards + 1);
+
+        if guards == 0 {
+            reservation
+                .head
+                // acquire: enter the critical section
+                //
+                // pointer loads must only occur after
+                // we mark this thread as active
+                .swap(ptr::null_mut(), Ordering::Acquire);
+        }
+    }
+
+    // Mark the current thread as inactive
+    pub fn leave(&self) {
+        trace!("marking thread as inactive");
+
+        let reservation = self.reservations.get_or(Default::default);
+        let guards = reservation.guards.get();
+        reservation.guards.set(guards - 1);
+
+        if guards == 1 {
+            // release: exit the critical section
+            // acquire: acquire any new reservation nodes
+            let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
+
+            if head != Node::INACTIVE {
+                // decrement any batch reference counts that were added
+                unsafe { Collector::traverse(head) }
+            }
+        }
+    }
+
+    // Decrement any reference counts, keeping the thread marked
+    // as active
+    pub unsafe fn flush(&self) {
+        trace!("flushing guard");
+
+        let reservation = self.reservations.get_or(Default::default);
+
+        let guards = reservation.guards.get();
+        reservation.guards.set(guards - 1);
+
+        if guards == 1 {
+            // release: exit the critical section
+            // acquire: acquire any new reservation nodes
+            let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
+
+            if head != Node::INACTIVE {
+                // decrement any batch reference counts that were added
+                unsafe { Collector::traverse(head) }
+            }
+        }
     }
 
     // Protect an atomic load
@@ -322,39 +370,6 @@ impl Collector {
         batch.size = 0;
     }
 
-    // Mark the current thread as inactive
-    pub fn leave(&self) {
-        trace!("marking thread as inactive");
-
-        let reservation = self.reservations.get_or(Default::default);
-
-        // release: exit the critical section
-        // acquire: acquire any new reservation nodes
-        let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
-
-        if head != Node::INACTIVE {
-            // decrement any batch reference counts that were added
-            unsafe { Collector::traverse(head) }
-        }
-    }
-
-    // Decrement any reference counts, keeping the thread marked
-    // as active
-    pub unsafe fn flush(&self) {
-        trace!("flushing guard");
-
-        let reservation = self.reservations.get_or(Default::default);
-
-        // release: exit the critical section
-        // acquire: acquire any new reservation nodes
-        let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
-
-        if head != Node::INACTIVE {
-            // decrement any batch reference counts that were added
-            unsafe { Collector::traverse(head) }
-        }
-    }
-
     // Traverse the reservation list, decrementing the
     // refernce count of each batch
     //
@@ -517,9 +532,11 @@ impl Node {
 struct Reservation {
     // The head of the list
     head: AtomicPtr<Node>,
-    // The epoch value when the thread associated with this list
-    // ast accessed a pointer
+    // The epoch value when the thread associated with
+    // this list last accessed a pointer
     epoch: AtomicU64,
+    // the number of guards created by this thread
+    guards: Cell<u64>,
 }
 
 impl Default for Reservation {
@@ -527,6 +544,7 @@ impl Default for Reservation {
         Reservation {
             head: AtomicPtr::new(Node::INACTIVE),
             epoch: AtomicU64::new(0),
+            guards: Cell::new(0),
         }
     }
 }

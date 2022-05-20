@@ -20,10 +20,15 @@ log = ["tracing"]
 
 [dev-dependencies]
 criterion = "0.3.5"
+crossbeam-epoch = "0.9.8"
 flize = { git = "https://github.com/xacrimon/flize" }
 haphazard = { git = "https://github.com/jonhoo/haphazard", rev = "697792c6" }
 serial_test = "0.5.1"
 
 [[bench]]
-name = "bench"
+name = "stack"
+harness = false
+
+[[bench]]
+name = "single_thread"
 harness = false
