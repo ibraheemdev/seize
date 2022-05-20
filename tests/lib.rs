@@ -1,4 +1,4 @@
-use seize::{reclaim, AtomicPtr, Collector, Guard, Linked};
+use seize::{reclaim, AtomicPtr, Collector, Guard};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -129,32 +129,6 @@ fn stress() {
         assert!(stack.pop().is_none());
         assert!(stack.is_empty());
     }
-}
-
-#[test]
-fn delayed_retire() {
-    let collector = Collector::new().batch_size(5);
-    let objects: Vec<*mut Linked<usize>> = (0..30).map(|_| collector.link_boxed(42)).collect();
-    let linked_references: Vec<&Linked<usize>> = objects.iter().map(|x| unsafe { &**x }).collect();
-    let references: Vec<&usize> = objects.iter().map(|x| unsafe { &***x }).collect();
-
-    let guard = collector.enter();
-
-    for object in objects {
-        unsafe {
-            guard.retire(object, reclaim::boxed::<usize>);
-        }
-    }
-
-    for x in linked_references {
-        assert_eq!(**x, 42);
-    }
-
-    for x in references {
-        assert_eq!(*x, 42);
-    }
-
-    drop(guard);
 }
 
 #[test]
@@ -295,6 +269,84 @@ fn flush() {
         let old = n.swap(ptr::null_mut(), Ordering::Acquire);
         unsafe { collector.retire(old, reclaim::boxed::<usize>) }
     }
+}
+
+#[test]
+fn delayed_retire() {
+    struct DropTrack(Arc<AtomicUsize>);
+
+    impl Drop for DropTrack {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let collector = Collector::new().batch_size(5);
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    let objects: Vec<_> = (0..30)
+        .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
+        .collect();
+
+    let guard = collector.enter();
+
+    for object in objects {
+        unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+    }
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard);
+    assert_eq!(dropped.load(Ordering::Relaxed), 30);
+}
+
+#[test]
+fn reentrant() {
+    struct UnsafeSend<T>(T);
+    unsafe impl<T> Send for UnsafeSend<T> {}
+
+    struct DropTrack(Arc<AtomicUsize>);
+
+    impl Drop for DropTrack {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let collector = Arc::new(Collector::new().batch_size(5).epoch_frequency(None));
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    let objects: UnsafeSend<Vec<_>> = UnsafeSend(
+        (0..5)
+            .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
+            .collect(),
+    );
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+    let guard1 = collector.enter();
+    let guard2 = collector.enter();
+    let guard3 = collector.enter();
+
+    std::thread::spawn({
+        let collector = collector.clone();
+
+        move || {
+            let guard = collector.enter();
+            for object in objects.0 {
+                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+            }
+        }
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard1);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard2);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard3);
+    assert_eq!(dropped.load(Ordering::Relaxed), 5);
 }
 
 #[test]

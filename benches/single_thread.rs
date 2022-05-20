@@ -100,7 +100,7 @@ mod seize_stack {
                     assert!((*head).data == Some(1));
                 });
 
-                return (*head).data.clone();
+                (*head).data
             }
         }
 
@@ -159,7 +159,7 @@ mod crossbeam_stack {
                     assert!((*head).data == Some(1));
                 });
 
-                return (*head).data.clone();
+                (*head).data
             }
         }
 

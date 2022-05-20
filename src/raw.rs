@@ -89,8 +89,9 @@ impl Collector {
 
     // Mark the current thread as active
     pub fn enter(&self) {
-        let reservation = self.reservations.get_or(Default::default);
+        trace!("marking thread as active");
 
+        let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
         reservation.guards.set(guards + 1);
 
@@ -131,9 +132,7 @@ impl Collector {
         trace!("flushing guard");
 
         let reservation = self.reservations.get_or(Default::default);
-
         let guards = reservation.guards.get();
-        reservation.guards.set(guards - 1);
 
         if guards == 1 {
             // release: exit the critical section
