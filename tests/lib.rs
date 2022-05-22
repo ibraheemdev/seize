@@ -347,6 +347,44 @@ fn reentrant() {
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     drop(guard3);
     assert_eq!(dropped.load(Ordering::Relaxed), 5);
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    let objects: UnsafeSend<Vec<_>> = UnsafeSend(
+        (0..5)
+            .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
+            .collect(),
+    );
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+    let mut guard1 = collector.enter();
+    let mut guard2 = collector.enter();
+    let mut guard3 = collector.enter();
+
+    std::thread::spawn({
+        let collector = collector.clone();
+
+        move || {
+            let guard = collector.enter();
+            for object in objects.0 {
+                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+            }
+        }
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    guard1.flush();
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard1);
+    guard2.flush();
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard2);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    guard3.flush();
+    assert_eq!(dropped.load(Ordering::Relaxed), 5);
 }
 
 #[test]

@@ -79,9 +79,44 @@ impl Collector {
         self
     }
 
-    /// Returns a guard that can protect loads of atomic pointers.
+    /// Marks the current thread as active, returning a guard
+    /// that allows loading atomic pointers. The thread
+    /// will be marked as inactive when the guard is dropped.
     ///
-    /// See [the guide](crate#beginning-operations) for details.
+    /// See [the guide](crate#starting-operations) for an introduction.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use seize::AtomicPtr;
+    /// # let collector = seize::Collector::new();
+    /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
+    ///
+    /// let guard = collector.enter();
+    /// let value = guard.protect(&ptr);
+    /// unsafe { assert_eq!(**value, 1) }
+    /// ```
+    ///
+    /// Note that `enter` is reentrant, and it is legal to create
+    /// multiple guards on the same thread. The thread will stay
+    /// marked as active until the last guard is dropped:
+    ///
+    /// ```rust
+    /// # use seize::AtomicPtr;
+    /// # let collector = seize::Collector::new();
+    /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
+    ///
+    /// let guard1 = collector.enter();
+    /// let guard2 = collector.enter();
+    ///
+    /// let value = guard2.protect(&ptr);
+    /// drop(guard1);
+    /// // the first guard is dropped, but `value`
+    /// // is still safe to access as a guard still
+    /// // exists
+    /// unsafe { assert_eq!(**value, 1) }
+    /// drop(guard2) // _now_, the thread is marked as inactive
+    /// ```
     pub fn enter(&self) -> Guard<'_> {
         self.raw.enter();
 
@@ -172,11 +207,10 @@ impl fmt::Debug for Collector {
     }
 }
 
-/// A guard that can protect loads of atomic pointers.
+/// A guard that keeps the current thread marked as active,
+/// enabling protected loads of atomic pointers.
 ///
-/// A guard can be created from a [collector](Collector::enter).
-///
-/// See [the guide](crate#beginning-operations) for details.
+/// See [`Collector::enter`] for details.
 pub struct Guard<'a> {
     collector: *const Collector,
     should_retire: UnsafeCell<bool>,

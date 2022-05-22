@@ -134,6 +134,10 @@ impl Collector {
         let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
 
+        // we can only take the reservation list
+        // if this is the only guard for the current
+        // thread, otherwise it may free memory
+        // being used by a different guard.
         if guards == 1 {
             // release: exit the critical section
             // acquire: acquire any new reservation nodes

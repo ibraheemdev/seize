@@ -1,8 +1,8 @@
 //! Common memory reclaimers.
 //!
 //! Functions in this module can be passed to [`retire`](crate::Collector::retire)
-//! to free allocated memory. See [the guide](crate#3-reclaimers) for details about
-//! memory reclamation, and writing custom reclaimers.
+//! to free allocated memory or run drop glue. See [the guide](crate#3-reclaimers)
+//! for details about memory reclamation, and writing custom reclaimers.
 
 use std::ptr;
 

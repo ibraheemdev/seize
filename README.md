@@ -108,10 +108,10 @@ impl<T> Stack<T> {
 }
 ```
 
-### Beginning Operations
+### Starting Operations
 
-To begin a concurrent operation, you must mark the thread as _active_ by calling
-the `enter` method.
+Before starting an operation that involves loading atomic pointers, you must
+mark the thread as _active_ by calling the `enter` method.
 
 ```rust,ignore
 impl Stack {
@@ -129,9 +129,9 @@ impl Stack {
 
 `enter` returns a guard that allows you to safely load an atomic pointer. Any
 _valid_ pointer loaded through a guard is guaranteed to stay valid until the
-guard is dropped, or it is retired by the current thread. Importantly, if a
-different thread retires an object while we you hold the guard, the collector
-knows not to reclaim the object until the guard is dropped.
+guard is dropped, or is retired by the current thread. Importantly, if another
+thread retires an object that you protected, the collector knows not to reclaim
+the object until your guard is dropped.
 
 ```rust,ignore
 impl Stack {
@@ -231,7 +231,7 @@ the guard, instead of on the collector directly:
 let ptr = guard.protect(&node);
 guard.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== ok!
-drop(guard); // <===== ptr is invalidated!
+drop(guard); // <===== ptr is invalidated
 ```
 
 #### 3. Custom Reclaimers
