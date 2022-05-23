@@ -21,7 +21,6 @@ log = ["tracing"]
 [dev-dependencies]
 criterion = "0.3.5"
 crossbeam-epoch = "0.9.8"
-flize = { git = "https://github.com/xacrimon/flize" }
 haphazard = { git = "https://github.com/jonhoo/haphazard", rev = "e0e18f60f78652a63aba235be854f87d106c1a1b" }
 serial_test = "0.5.1"
 
