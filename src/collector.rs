@@ -90,11 +90,12 @@ impl Collector {
     ///
     /// ```rust
     /// # use seize::AtomicPtr;
+    /// # use std::sync::atomic::Ordering;
     /// # let collector = seize::Collector::new();
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
     /// let guard = collector.enter();
-    /// let value = guard.protect(&ptr);
+    /// let value = guard.protect(&ptr, Ordering::Acquire);
     /// unsafe { assert_eq!(**value, 1) }
     /// ```
     ///
@@ -104,13 +105,14 @@ impl Collector {
     ///
     /// ```rust
     /// # use seize::AtomicPtr;
+    /// # use std::sync::atomic::Ordering;
     /// # let collector = seize::Collector::new();
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
     /// let guard1 = collector.enter();
     /// let guard2 = collector.enter();
     ///
-    /// let value = guard2.protect(&ptr);
+    /// let value = guard2.protect(&ptr, Ordering::Acquire);
     /// drop(guard1);
     /// // the first guard is dropped, but `value`
     /// // is still safe to access as a guard still
