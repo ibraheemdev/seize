@@ -6,7 +6,6 @@
 // copied, modified, or distributed except according to those terms.
 
 mod thread_id;
-use thread_id::Thread;
 
 use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
@@ -64,45 +63,13 @@ where
         }
     }
 
-    pub fn get_or(&self, f: impl Fn() -> T) -> &T {
+    pub fn get_or(&self, create: impl Fn() -> T) -> &T {
         let thread = thread_id::get();
 
-        match self.get_inner(thread) {
-            Some(x) => x,
-            None => self.insert(thread, f()),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn get(&self) -> Option<&T> {
-        self.get_inner(thread_id::get())
-    }
-
-    fn get_inner(&self, thread: Thread) -> Option<&T> {
-        let bucket_ptr =
-            unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
-        if bucket_ptr.is_null() {
-            return None;
-        }
-        unsafe {
-            let entry = &*bucket_ptr.add(thread.index);
-            // read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
-                Some(&*(&*entry.value.get()).as_ptr())
-            } else {
-                None
-            }
-        }
-    }
-
-    #[cold]
-    fn insert(&self, thread: Thread, data: T) -> &T {
         let bucket = unsafe { self.buckets.get_unchecked(thread.bucket) };
+        let mut bucket_ptr = bucket.load(Ordering::Acquire);
 
-        let bucket_ptr: *const _ = bucket.load(Ordering::Acquire);
-
-        // if the bucket doesn't already exist, we need to allocate it
-        let bucket_ptr = if bucket_ptr.is_null() {
+        if bucket_ptr.is_null() {
             let new_bucket = allocate_bucket(thread.bucket_size);
 
             match bucket.compare_exchange(
@@ -111,29 +78,51 @@ where
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => new_bucket,
+                Ok(_) => bucket_ptr = new_bucket,
                 // if the bucket value changed (from null), that means
                 // another thread stored a new bucket before we could,
                 // and we can free our bucket and use that one instead
-                Err(bucket_ptr) => {
-                    unsafe {
-                        let _ = Box::from_raw(new_bucket);
-                    }
-
-                    bucket_ptr
-                }
+                Err(other) => unsafe {
+                    let _ = Box::from_raw(new_bucket);
+                    bucket_ptr = other;
+                },
             }
-        } else {
-            bucket_ptr
-        };
+        }
 
-        // insert the new element into the bucket
-        let entry = unsafe { &*bucket_ptr.add(thread.index) };
-        let value_ptr = entry.value.get();
-        unsafe { value_ptr.write(MaybeUninit::new(data)) };
-        entry.present.store(true, Ordering::Release);
+        unsafe {
+            let entry = &*bucket_ptr.add(thread.index);
 
-        unsafe { &*(&*value_ptr).as_ptr() }
+            // read without atomic operations as only this thread can set the value.
+            if (&entry.present as *const _ as *const bool).read() {
+                (*entry.value.get()).assume_init_ref()
+            } else {
+                // insert the new element into the bucket
+                entry.value.get().write(MaybeUninit::new(create()));
+                entry.present.store(true, Ordering::Release);
+                (*entry.value.get()).assume_init_ref()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self) -> Option<&T> {
+        let thread = thread_id::get();
+        let bucket_ptr =
+            unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
+
+        if bucket_ptr.is_null() {
+            return None;
+        }
+
+        unsafe {
+            let entry = &*bucket_ptr.add(thread.index);
+            // read without atomic operations as only this thread can set the value.
+            if (&entry.present as *const _ as *const bool).read() {
+                Some((*entry.value.get()).assume_init_ref())
+            } else {
+                None
+            }
+        }
     }
 
     pub fn iter(&self) -> Iter<'_, T> {
