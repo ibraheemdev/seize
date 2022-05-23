@@ -97,6 +97,7 @@ impl Collector {
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
     /// unsafe { assert_eq!(**value, 1) }
+    /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
     /// ```
     ///
     /// Note that `enter` is reentrant, and it is legal to create
@@ -118,6 +119,7 @@ impl Collector {
     /// // is still safe to access as a guard still
     /// // exists
     /// unsafe { assert_eq!(**value, 1) }
+    /// # unsafe { guard2.retire(value, seize::reclaim::boxed::<usize>) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     pub fn enter(&self) -> Guard<'_> {
