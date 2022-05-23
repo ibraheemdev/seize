@@ -54,7 +54,7 @@ Seize avoids the use of global state and encourages creating a designated
 _collector_ per data structure. Collectors allow you to allocate, protect, and
 retire objects:
 
-```rust
+```rust,ignore
 use seize::Collector;
 
 struct Stack<T> {
@@ -141,7 +141,7 @@ impl Stack {
         let guard = self.collector.enter();
 
         loop {
-            let head = guard.protect(&self.head); // <===
+            let head = guard.protect(&self.head, Ordering::Acquire); // <===
             unsafe { (*node).next = head; }
 
             if self
@@ -176,7 +176,7 @@ impl<T> Stack<T> {
         let guard = self.collector.enter(); // <=== mark the thread as active
 
         loop {
-            let head = guard.protect(&self.head); // <=== safely load the head
+            let head = guard.protect(&self.head, Ordering::Acquire); // <=== safely load the head
 
             if head.is_null() {
                 return None;
@@ -218,7 +218,7 @@ current thread. If no other thread holds a reference to an object it may be
 reclaimed _immediately_. This makes the following code unsound:
 
 ```rust,ignore
-let ptr = guard.protect(&node);
+let ptr = guard.protect(&node, Ordering::Acquire);
 collector.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== unsound!
 ```
@@ -227,7 +227,7 @@ Retirement can be delayed until the guard is dropped by calling `retire` on
 the guard, instead of on the collector directly:
 
 ```rust,ignore
-let ptr = guard.protect(&node);
+let ptr = guard.protect(&node, Ordering::Acquire);
 guard.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== ok!
 drop(guard); // <===== ptr is invalidated

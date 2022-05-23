@@ -242,15 +242,17 @@ impl Guard<'_> {
         }
     }
 
-    /// Protect the load of an atomic pointer.
+    /// Protects the load of an atomic pointer.
     ///
     /// See [the guide](crate#protecting-pointers) for details.
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut Linked<T> {
+    #[inline]
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
         if self.collector.is_null() {
-            return ptr.load(Ordering::Acquire);
+            // unprotected guard
+            return ptr.load(ordering);
         }
 
-        unsafe { (*self.collector).raw.protect(ptr) }
+        unsafe { (*self.collector).raw.protect(ptr, ordering) }
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
@@ -264,6 +266,7 @@ impl Guard<'_> {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         if self.collector.is_null() {
+            // unprotected guard
             return unsafe { (reclaim)(Link { node: ptr as _ }) };
         }
 

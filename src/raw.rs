@@ -151,12 +151,14 @@ impl Collector {
     }
 
     // Protect an atomic load
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut T {
+    #[inline]
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
         trace!("protecting pointer");
 
         if self.epoch_frequency.is_none() {
-            // epoch tracking is disabled
-            return ptr.load(Ordering::Acquire);
+            // epoch tracking is disabled, nothing
+            // special needed here
+            return ptr.load(ordering);
         }
 
         let reservation = self.reservations.get_or(Default::default);
@@ -167,13 +169,19 @@ impl Collector {
         // by the current thread
         let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
+        // acquire: acquire the birth epoch of this pointer.
+        // TODO(ibraheem): this requires that the pointer value
+        // was stored with release ordering, which is not enforced
+        // by the current API
+        let ordering = at_least_acquire(ordering);
+
         loop {
-            let ptr = ptr.load(Ordering::Acquire);
+            let ptr = ptr.load(ordering);
 
             // relaxed: we acquired at least the pointer's
-            // birth epoch above. we need to record that or
-            // anything later to let other threads know that
-            // we can still access the pointer
+            // birth epoch above. we need to record at least that
+            // epoch to let other threads know that we can still
+            // access the pointer
             let current_epoch = self.epoch.load(Ordering::Relaxed);
 
             if prev_epoch == current_epoch {
@@ -574,3 +582,12 @@ impl Default for Batch {
 
 unsafe impl Send for Batch {}
 unsafe impl Sync for Batch {}
+
+#[inline]
+fn at_least_acquire(ordering: Ordering) -> Ordering {
+    match ordering {
+        Ordering::Acquire => Ordering::Acquire,
+        Ordering::SeqCst => Ordering::SeqCst,
+        _ => ordering,
+    }
+}
