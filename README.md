@@ -54,7 +54,7 @@ Seize avoids the use of global state and encourages creating a designated
 _collector_ per data structure. Collectors allow you to allocate, protect, and
 retire objects:
 
-```rust,ignore
+```rust
 use seize::Collector;
 
 struct Stack<T> {
@@ -75,16 +75,16 @@ impl<T> Stack<T> {
 
 Seize requires storing some metadata about the global epoch for each object that
 is allocated. It also needs to reserve a couple words for retirement lists.
-Because of this, values in a concurrent data structure must take the form of
-`AtomicPtr<seize::Linked<T>>`, as opposed to just `AtomicPtr<T>`.
+Because of this, objects in a concurrent data structure that may be reclaimed must
+take the form of `seize::Linked<T>`, as opposed to just `T`.
 
 You can link a value to a collector with the `link` method. `link_boxed` is also
-provided as a quick way to link an object to a collector, and allocate it:
+provided as a quick way to link an object to a collector, and allocate it with `Box`:
 
 ```rust
-use std::sync::atomic::{AtomicPtr, Ordering};
+use seize::{reclaim, Collector, Linked};
 use std::mem::ManuallyDrop;
-use seize::{Collector, Linked};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub struct Stack<T> {
     head: AtomicPtr<Linked<Node<T>>>, // <===
@@ -92,15 +92,15 @@ pub struct Stack<T> {
 }
 
 struct Node<T> {
-    next: AtomicPtr<Linked<Node<T>>>, // <===
+    next: *mut Linked<Node<T>>, // <===
     value: ManuallyDrop<T>,
 }
 
 impl<T> Stack<T> {
     pub fn push(&self, value: T) {
         let node = self.collector.link_boxed(Node { // <===
+            next: std::ptr::null_mut(),
             value: ManuallyDrop::new(value),
-            next: AtomicPtr::new(std::ptr::null_mut()),
         });
 
         // ...
@@ -127,8 +127,8 @@ impl Stack {
 
 ### Protecting Pointers
 
-`enter` returns a guard that allows you to safely load an atomic pointer. Any
-_valid_ pointer loaded through a guard is guaranteed to stay valid until the
+`enter` returns a guard that allows you to safely load atomic pointers. Any
+valid pointer loaded through a guard is guaranteed to stay valid until the
 guard is dropped, or is retired by the current thread. Importantly, if another
 thread retires an object that you protected, the collector knows not to reclaim
 the object until your guard is dropped.
@@ -136,16 +136,13 @@ the object until your guard is dropped.
 ```rust,ignore
 impl Stack {
     pub fn push(&self, value: T) {
-        let node = self.collector.link_boxed(Node {
-            value: ManuallyDrop::new(value),
-            next: AtomicPtr::new(ptr::null_mut()),
-        });
+        // ...
 
         let guard = self.collector.enter();
 
         loop {
-            let head = guard.protect(&self.head, Ordering::Acquire); // <===
-            unsafe { (*node).next.store(head, Ordering::Relaxed) }
+            let head = guard.protect(&self.head); // <===
+            unsafe { (*node).next = head; }
 
             if self
                 .head
@@ -163,27 +160,29 @@ impl Stack {
 
 Note that the lifetime of a guarded pointer is logically tied to that of the
 guard -- when the guard is dropped the pointer is invalidated -- but a raw
-pointer is returned for convenience.
+pointer is returned for convenience. Datastructures that return shared references
+to values should ensure that the lifetime of the reference is tied to the lifetime
+of a guard.
 
 ### Retiring Objects
 
 Objects that have been removed from a data structure can be safely _retired_
-through the collector. When no thread holds a reference to it, it's memory will
-be reclaimed:
+through the collector. It will be _reclaimed_ when no threads holds a reference
+to it:
 
 ```rust,ignore
 impl<T> Stack<T> {
     pub fn pop(&self) -> Option<T> {
-        let guard = self.collector.enter(); // <===
+        let guard = self.collector.enter(); // <=== mark the thread as active
 
         loop {
-            let head = guard.protect(&self.head); // <===
+            let head = guard.protect(&self.head); // <=== safely load the head
 
             if head.is_null() {
                 return None;
             }
 
-            let next = guard.protect(&(*head).next); // <===
+            let next = unsafe { (*head).next };
 
             if self
                 .head
@@ -191,8 +190,8 @@ impl<T> Stack<T> {
                 .is_ok()
             {
                 unsafe {
-                    let data = ptr::read(&(*head).data);
-                    self.collector.retire(head, |_| {}); // <===
+                    let data = ptr::read(&(*head).value);
+                    self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
                     return Some(ManuallyDrop::into_inner(data));
                 }
             }
@@ -209,8 +208,8 @@ An object can only be retired if it is _no longer accessible_ to any thread that
 comes after. In the above code example this was ensured by swapping out the node
 before retiring it. Threads that loaded a value _before_ it was retired are
 safe, but threads that come after are not. Note that this means the necessary
-memory orderings/fences are required to prevent store-load reordering between
-the operation that makes an object unreachable and `retire`.
+memory orderings/fences are required to prevent reordering between `compare_exchange`
+and `retire`, which is why `Ordering::AcqRel` is used as opposed to `Ordering::Release`.
 
 #### 2. Retired objects cannot be accessed by the current thread
 
@@ -239,7 +238,7 @@ drop(guard); // <===== ptr is invalidated
 You probably noticed that `retire` takes a function as a second parameter. This
 function is known as a _reclaimer_, and is run when the collector decides it is
 safe to free the retired object. Typically you will pass in a function from the
-`reclaim` module. For example, values allocated with `Box` can use
+`seize::reclaim` module. For example, values allocated with `Box` can use
 `reclaim::boxed`:
 
 ```rust,ignore
@@ -260,7 +259,7 @@ a different type than the object being retired.
 If you need to run custom reclamation code, you can write a custom reclaimer.
 Functions passed to `retire` are called with a type-erased `Link`. This is
 because retired values are connected to thread-local batches via linked lists,
-losing any information. To extract the underlying value from a link, you can
+losing any type information. To extract the underlying value from a link, you can
 call the `cast` method.
 
 ```rust,ignore

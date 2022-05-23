@@ -80,10 +80,11 @@ impl Collector {
     }
 
     /// Marks the current thread as active, returning a guard
-    /// that allows loading atomic pointers. The thread
+    /// that allows protecting loads of atomic pointers. The thread
     /// will be marked as inactive when the guard is dropped.
     ///
-    /// See [the guide](crate#starting-operations) for an introduction.
+    /// See [the guide](crate#starting-operations) for an introduction
+    /// to using guards.
     ///
     /// # Examples
     ///
