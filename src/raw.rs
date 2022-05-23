@@ -47,7 +47,7 @@ impl Collector {
         // safety: node counts are only accessed by the current thread
         let birth_epoch = unsafe {
             *count += 1;
-            trace!("allocated new value, values: {}", *count);
+            trace!("linked new value, values: {}", *count);
 
             match self.epoch_frequency {
                 Some(ref freq) if *count % freq.get() == 0 => {
@@ -153,8 +153,6 @@ impl Collector {
     // Protect an atomic load
     #[inline]
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
-        trace!("protecting pointer");
-
         if self.epoch_frequency.is_none() {
             // epoch tracking is disabled, nothing
             // special needed here
@@ -209,8 +207,6 @@ impl Collector {
         ptr: *mut Linked<T>,
         reclaim: unsafe fn(Link),
     ) -> (bool, &mut Batch) {
-        trace!("retiring pointer");
-
         // safety: batches are only accessed by the current thread
         let batch = unsafe { &mut *self.batches.get_or(Default::default).get() };
 
