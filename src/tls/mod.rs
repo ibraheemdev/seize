@@ -12,23 +12,24 @@ use std::mem::{self, MaybeUninit};
 use std::ptr;
 
 // TODO: loom doesn't expose get_mut
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
+    entries: AtomicUsize,
 }
 
 struct Entry<T> {
-    present: AtomicBool,
+    active: AtomicBool,
     value: UnsafeCell<MaybeUninit<T>>,
 }
 
 impl<T> Drop for Entry<T> {
     fn drop(&mut self) {
         unsafe {
-            if *self.present.get_mut() {
+            if *self.active.get_mut() {
                 ptr::drop_in_place((*self.value.get()).as_mut_ptr());
             }
         }
@@ -60,6 +61,7 @@ where
         ThreadLocal {
             // safety: `AtomicPtr` has the same representation as a pointer
             buckets: unsafe { mem::transmute(buckets) },
+            entries: AtomicUsize::new(0),
         }
     }
 
@@ -93,15 +95,22 @@ where
             let entry = &*bucket_ptr.add(thread.index);
 
             // read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
+            if (&entry.active as *const _ as *const bool).read() {
                 (*entry.value.get()).assume_init_ref()
             } else {
                 // insert the new element into the bucket
                 entry.value.get().write(MaybeUninit::new(create()));
-                entry.present.store(true, Ordering::Release);
+                entry.active.store(true, Ordering::Release);
+                // release: release entry.active
+                self.entries.fetch_add(1, Ordering::Release);
                 (*entry.value.get()).assume_init_ref()
             }
         }
+    }
+
+    pub fn entries(&self) -> usize {
+        // acquire entry.active
+        self.entries.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -117,7 +126,7 @@ where
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
             // read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
+            if (&entry.active as *const _ as *const bool).read() {
                 Some((*entry.value.get()).assume_init_ref())
             } else {
                 None
@@ -198,7 +207,7 @@ where
                 while self.index < self.bucket_size {
                     let entry = unsafe { &*bucket.add(self.index) };
                     self.index += 1;
-                    if entry.present.load(Ordering::Acquire) {
+                    if entry.active.load(Ordering::Acquire) {
                         return Some(unsafe { &*(&*entry.value.get()).as_ptr() });
                     }
                 }
@@ -220,7 +229,7 @@ fn allocate_bucket<T>(size: usize) -> *mut Entry<T> {
     Box::into_raw(
         (0..size)
             .map(|_| Entry::<T> {
-                present: AtomicBool::new(false),
+                active: AtomicBool::new(false),
                 value: UnsafeCell::new(MaybeUninit::uninit()),
             })
             .collect(),
