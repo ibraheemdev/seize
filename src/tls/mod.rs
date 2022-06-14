@@ -83,7 +83,11 @@ where
                 // another thread stored a new bucket before we could,
                 // and we can free our bucket and use that one instead
                 Err(other) => unsafe {
-                    let _ = Box::from_raw(new_bucket);
+                    let _ = Box::from_raw(ptr::slice_from_raw_parts_mut(
+                        new_bucket,
+                        thread.bucket_size,
+                    ));
+
                     bucket_ptr = other;
                 },
             }
