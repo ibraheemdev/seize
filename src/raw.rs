@@ -281,6 +281,11 @@ impl Collector {
         unsafe { (*batch.tail).batch_link = batch.head }
 
         let mut last = batch.head;
+
+        // record all current active threads.
+        // we need to do this in a separate step to make
+        // sure we have enough reservation nodes, as the number
+        // of threads can grow dynamically
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
@@ -288,11 +293,9 @@ impl Collector {
             // here and stores in `enter` - reading a stale value
             // could cause us to skip active threads
             //
-            // relaxed: the `swap(Acquire)` that made the pointer
-            // unreachable acts as a #StoreLoad fence. as long as
-            // this thread was inactive any time after the pointers
-            // in this batch were made unreachable, we can safely skip it.
-            if reservation.head.rdmw(Ordering::Relaxed) == Node::INACTIVE {
+            // acquire: prevent reordering between this operation
+            // and the second load of `head` below
+            if reservation.head.rdmw(Ordering::Acquire) == Node::INACTIVE {
                 continue;
             }
 
@@ -304,7 +307,10 @@ impl Collector {
             // we can also skip it. if epoch tracking is disabled this is
             // always false (0 < 0)
             //
-            // the ordering requirements here are the same as above
+            // relaxed: the `swap(Acquire)` that made the pointer
+            // unreachable acts as a #StoreLoad fence. as long as
+            // this thread was inactive any time after the pointers
+            // in this batch were made unreachable, we can safely skip it.
             if reservation.epoch.rdmw(Ordering::Relaxed) < min_epoch {
                 continue;
             }
@@ -332,20 +338,34 @@ impl Collector {
             // initialized `reservation.head` for all nodes until `last`
             // in the loop above
             let head = unsafe { &*(*curr).reservation.head };
+            let mut prev = head.load(Ordering::Acquire);
 
             loop {
-                let prev = head.load(Ordering::Acquire);
+                // the thread became inactive, skip it.
+                //
+                // note that this does not have to be an RMW
+                // load because as long as the thread became
+                // inactive at some point after  we verified
+                // it was active, it can no longer access the
+                // pointer
+                if prev == Node::INACTIVE {
+                    break;
+                }
 
                 // relaxed: acq/rel synchronization is provided by `head`
                 unsafe { (*curr).reservation.next.store(prev, Ordering::Relaxed) }
 
                 // release: release the new reservation nodes
-                if head
-                    .compare_exchange_weak(prev, curr, Ordering::Release, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    active += 1;
-                    break;
+                match head.compare_exchange_weak(prev, curr, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => {
+                        active += 1;
+                        break;
+                    }
+                    // retry
+                    Err(found) => {
+                        prev = found;
+                        continue;
+                    }
                 }
             }
 
