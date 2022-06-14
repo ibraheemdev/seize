@@ -281,7 +281,7 @@ impl Collector {
         //
         // acquire: acquire any threads that were created
         //
-        // this rdmw operation is neccessary maintain a
+        // this rdmw operation is necessary to maintain a
         // total order between the load here and increments
         // when a new thread is allocated. reading a stale value
         // could cause us to skip active threads

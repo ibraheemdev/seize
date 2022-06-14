@@ -89,8 +89,9 @@ impl<T> Rdmw for AtomicPtr<T> {
     fn rdmw(&self, ordering: Ordering) -> Self::Output {
         #[cfg(not(miri))]
         {
-            // this is effectifvely int2ptr2int, which strict-provenance doesn't allow,
-            // but until `strict_provenance_atomic_ptr` is stable this will have to do
+            // this is effectively int2ptr2int which strict-provenance doesn't allow,
+            // but until `strict_provenance_atomic_ptr` is stable this will have to do.
+            // see https://github.com/rust-lang/rust/issues/95492 for details
             unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
         }
         #[cfg(miri)]
@@ -105,4 +106,3 @@ impl<T> Rdmw for AtomicPtr<T> {
         }
     }
 }
-
