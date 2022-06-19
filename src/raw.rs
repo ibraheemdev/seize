@@ -285,7 +285,7 @@ impl Collector {
         // total order between the load here and increments
         // when a new thread is allocated. reading a stale value
         // could cause us to skip active threads
-        if self.reservations.entries.rdmw(Ordering::Acquire) <= batch.size {
+        if batch.size <= self.reservations.entries.rdmw(Ordering::Acquire) {
             return;
         }
 
