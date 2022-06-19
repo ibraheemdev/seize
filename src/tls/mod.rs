@@ -12,12 +12,13 @@ use std::mem::{self, MaybeUninit};
 use std::ptr;
 
 // TODO: loom doesn't expose get_mut
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
+    pub entries: AtomicUsize,
 }
 
 struct Entry<T> {
@@ -60,6 +61,7 @@ where
         ThreadLocal {
             // safety: `AtomicPtr` has the same representation as a pointer
             buckets: unsafe { mem::transmute(buckets) },
+            entries: AtomicUsize::new(0),
         }
     }
 
@@ -103,6 +105,7 @@ where
                 // insert the new element into the bucket
                 entry.value.get().write(MaybeUninit::new(create()));
                 entry.present.store(true, Ordering::Release);
+                self.entries.fetch_add(1, Ordering::AcqRel);
                 (*entry.value.get()).assume_init_ref()
             }
         }

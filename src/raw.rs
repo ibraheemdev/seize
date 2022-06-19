@@ -276,6 +276,19 @@ impl Collector {
     pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
+        // if there are not enough nodes in this batch for
+        // active threads, we have to try again later
+        //
+        // acquire: acquire any threads that were created
+        //
+        // this rdmw operation is neccessary maintain a
+        // total order between the load here and increments
+        // when a new thread is allocated. reading a stale value
+        // could cause us to skip active threads
+        if self.reservations.entries.rdmw(Ordering::Acquire) <= batch.size {
+            return;
+        }
+
         // safety: caller guarantees that the batch is not empty,
         // so batch.tail must be valid
         unsafe { (*batch.tail).batch_link = batch.head }
@@ -289,9 +302,10 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
-            // rdmw: maintain a total order between the check
-            // here and stores in `enter` - reading a stale value
-            // could cause us to skip active threads
+            // this has to be a rdmw operation to maintain a
+            // total order between the load here and stores on
+            // enter. reading a stale value could cause us to
+            // skip active threads
             //
             // acquire: prevent reordering between this operation
             // and the second load of `head` below
