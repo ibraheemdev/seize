@@ -309,7 +309,7 @@ impl Collector {
             //
             // acquire: prevent reordering between this operation
             // and the second load of `head` below
-            if reservation.head.rdmw(Ordering::Acquire) == Node::INACTIVE {
+            if reservation.head.rdmw(Ordering::AcqRel) == Node::INACTIVE {
                 continue;
             }
 
@@ -325,7 +325,7 @@ impl Collector {
             // unreachable acts as a #StoreLoad fence. as long as
             // this thread was inactive any time after the pointers
             // in this batch were made unreachable, we can safely skip it.
-            if reservation.epoch.rdmw(Ordering::Relaxed) < min_epoch {
+            if reservation.epoch.rdmw(Ordering::AcqRel) < min_epoch {
                 continue;
             }
 
