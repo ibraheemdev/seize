@@ -98,8 +98,8 @@ impl<T> Rdmw for AtomicPtr<T> {
         {
             // under miri we can use a (less efficient) compare exchange loop
             // to avoid the cast
-            let ptr = self.load(ordering);
-            match self.compare_exchange(ptr, ptr, ordering, ordering) {
+            let ptr = self.load(Ordering::Acquire);
+            match self.compare_exchange(ptr, ptr, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => ptr,
                 Err(latest) => latest,
             }
