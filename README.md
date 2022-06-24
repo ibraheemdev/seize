@@ -186,7 +186,7 @@ impl<T> Stack<T> {
 
             if self
                 .head
-                .compare_exchange(head, next, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange(head, next, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
                 unsafe {
@@ -207,9 +207,7 @@ There are a couple important things to note about retiring an object:
 An object can only be retired if it is _no longer accessible_ to any thread that
 comes after. In the above code example this was ensured by swapping out the node
 before retiring it. Threads that loaded a value _before_ it was retired are
-safe, but threads that come after are not. Note that this means the necessary
-memory orderings/fences are required to prevent reordering between `compare_exchange`
-and `retire`, which is why `Ordering::AcqRel` is used as opposed to `Ordering::Release`.
+safe, but threads that come after are not.
 
 #### 2. Retired objects cannot be accessed by the current thread
 

@@ -98,10 +98,8 @@ impl Collector {
         if guards == 0 {
             reservation
                 .head
-                // acquire: enter the critical section
-                //
-                // pointer loads must only occur after
-                // we mark this thread as active
+                // acquire: acquire the new values of any pointers
+                // that were retired while we were inactive
                 .swap(ptr::null_mut(), Ordering::Acquire);
         }
     }
@@ -116,7 +114,10 @@ impl Collector {
 
         if guards == 1 {
             // release: exit the critical section
-            // acquire: acquire any new reservation nodes
+            //
+            // acquire: acquire any new reservation nodes, and
+            // the new values of any pointers that were retired
+            // for the next time we become active
             let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
 
             if head != Node::INACTIVE {
@@ -134,13 +135,15 @@ impl Collector {
         let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
 
-        // we can only take the reservation list
-        // if this is the only guard for the current
-        // thread, otherwise it may free memory
-        // being used by a different guard.
+        // we can only take the reservation list if this
+        // is the only guard for the current thread, otherwise
+        // it may free memory being used by a different guard
         if guards == 1 {
             // release: exit the critical section
-            // acquire: acquire any new reservation nodes
+            //
+            // acquire: acquire any new reservation nodes, and
+            // the new values of any pointers that were retired
+            // for the next time we become active
             let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
 
             if head != Node::INACTIVE {
@@ -182,23 +185,23 @@ impl Collector {
             // access the pointer
             let current_epoch = self.epoch.load(Ordering::Relaxed);
 
-            if prev_epoch == current_epoch {
-                return ptr;
-            } else {
+            // our epoch is out of date, record the new one
+            // and try again
+            if prev_epoch != current_epoch {
                 trace!(
                     "updating epoch for from {} to {}",
                     prev_epoch,
                     current_epoch
                 );
 
-                // acquire: enter the critical section
-                //
-                // pointer loads must only occur after we mark this
-                // thread as active in the new epoch
+                // acquire: acquire the new values of any pointers
+                // that were retired while we were inactive
                 reservation.epoch.swap(current_epoch, Ordering::Acquire);
-
                 prev_epoch = current_epoch;
+                continue;
             }
+
+            return ptr;
         }
     }
 
@@ -293,6 +296,10 @@ impl Collector {
         // so batch.tail must be valid
         unsafe { (*batch.tail).batch_link = batch.head }
 
+        // safety: the tail of a batch list is always a REFS node with
+        // `min_epoch` initialized
+        let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
+
         let mut last = batch.head;
 
         // record all current active threads.
@@ -302,42 +309,38 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
-            // this has to be a rdmw operation to maintain a
-            // total order between the load here and stores on
-            // enter. reading a stale value could cause us to
-            // skip active threads
-            //
             // acquire: prevent reordering between this operation
             // and the second load of `head` below
+            //
+            // release: release the new value of pointers in this
+            // batch for the thread to acquire the next time
+            // it changes state (becomes active/inactive)
             if reservation.head.rdmw(Ordering::AcqRel) == Node::INACTIVE {
                 continue;
             }
 
-            // safety: the tail of a batch list is always a REFS node with
-            // `min_epoch` initialized
-            let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
-
-            // if this thread's epoch is behind all the nodes in the batch,
-            // we can also skip it. if epoch tracking is disabled this is
-            // always false (0 < 0)
+            // if this thread's epoch is behind the earliest birth epoch
+            // in this batch, we can skip it as there is no way it could
+            // have accessed any of the pointers in this batch
             //
-            // relaxed: the `swap(Acquire)` that made the pointer
-            // unreachable acts as a #StoreLoad fence. as long as
-            // this thread was inactive any time after the pointers
-            // in this batch were made unreachable, we can safely skip it.
+            // if epoch tracking is disabled this is always false (0 < 0)
+            //
+            // release: release the new value of pointers in this batch
+            // for the thread to acquire the next time it loads a pointer
+            // and sees it's epoch is out of date
             if reservation.epoch.rdmw(Ordering::AcqRel) < min_epoch {
                 continue;
             }
 
-            // we don't have enough nodes to insert into the active
-            // threads reservation lists, try again later
+            // we don't have enough nodes to insert into the reservation lists
+            // of all active threads, try again later
             if last == batch.tail {
                 return;
             }
 
             // safety: we checked that this is not the last node
             // in the batch list above, so we can never access
-            // an invalid link
+            // an invalid node
             unsafe {
                 (*last).reservation.head = &reservation.head;
                 last = (*last).batch.next;
