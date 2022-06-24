@@ -255,7 +255,7 @@ fn flush() {
 
     for i in 0..cfg::ITER {
         for n in nums.iter() {
-            let old = n.swap(collector.link_boxed(i), Ordering::Release);
+            let old = n.swap(collector.link_boxed(i), Ordering::AcqRel);
             unsafe { collector.retire(old, reclaim::boxed::<usize>) }
         }
     }

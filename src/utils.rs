@@ -87,9 +87,22 @@ impl<T> Rdmw for AtomicPtr<T> {
     type Output = *mut T;
 
     fn rdmw(&self, ordering: Ordering) -> Self::Output {
-        // the int2ptr cast here is sketchy, but we never
-        // actually dereference the pointer, it's only used
-        // for comparisons.
-        unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
+        #[cfg(not(miri))]
+        {
+            // this is effectively int2ptr2int which strict-provenance doesn't allow,
+            // but until `strict_provenance_atomic_ptr` is stable this will have to do.
+            // see https://github.com/rust-lang/rust/issues/95492 for details
+            unsafe { (*(self as *const _ as *const AtomicUsize)).fetch_add(0, ordering) as *mut _ }
+        }
+        #[cfg(miri)]
+        {
+            // under miri we can use a (less efficient) compare exchange loop
+            // to avoid the cast
+            let ptr = self.load(Ordering::Acquire);
+            match self.compare_exchange(ptr, ptr, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => ptr,
+                Err(latest) => latest,
+            }
+        }
     }
 }
