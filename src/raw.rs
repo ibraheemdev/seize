@@ -68,11 +68,15 @@ impl Collector {
                 //
                 // the only problematic case would be if a node
                 // was created with a birth_epoch *later* than the
-                // global epoch at the time it was created, as any
-                // thread loading it wouldn't record the new epoch.
-                // This is impossible as the RMW in `protect` is
-                // guaranteed to see the latest epoch epoch and
-                // therefore we cannot see a value later than it
+                // global epoch a thread sees when protecting it, as
+                // the thread wouldn't record the new epoch.
+                // this is impossible as `protect` has acquire
+                // semantics and is guaranteed to see this value
+                // when the value is stored with release semantics
+                //
+                // TODO(ibraheem): this requires that the pointer value
+                // was stored with release ordering, which is not enforced
+                // by the current API
                 _ => self.epoch.load(Ordering::Relaxed),
             }
         };
@@ -115,7 +119,7 @@ impl Collector {
         if guards == 1 {
             // release: exit the critical section
             //
-            // acquire: acquire any new reservation nodes, and
+            // acquire: acquire any new reservation nodes and
             // the new values of any pointers that were retired
             // for the next time we become active
             let head = reservation.head.swap(Node::INACTIVE, Ordering::AcqRel);
@@ -170,10 +174,7 @@ impl Collector {
         // by the current thread
         let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
-        // acquire: acquire the birth epoch of this pointer.
-        // TODO(ibraheem): this requires that the pointer value
-        // was stored with release ordering, which is not enforced
-        // by the current API
+        // acquire: acquire the birth epoch of this pointer
         let ordering = at_least_acquire(ordering);
 
         loop {
@@ -195,7 +196,8 @@ impl Collector {
                 );
 
                 // acquire: acquire the new values of any pointers
-                // that were retired while we were inactive
+                // that were retired while we were inactive in the
+                // new epoch
                 reservation.epoch.swap(current_epoch, Ordering::Acquire);
                 prev_epoch = current_epoch;
                 continue;
@@ -218,9 +220,10 @@ impl Collector {
         // safety: `ptr` is guaranteed to be a valid pointer
         //
         // any other thread with a reference to the pointer
-        // will only have an shared reference to the UnsafeCell<Node>,
-        // and the caller guarantees that the same pointer is
-        // not retired twice, so we can safely write to the node here
+        // will only have an *shared* reference to the UnsafeCell<Node>,
+        // which is allowed to alias. the caller guarantees that the
+        // same pointer is not retired twice, so we can safely write
+        // to the node here
         unsafe { (*node).reclaim = reclaim }
 
         if batch.head.is_null() {
@@ -239,8 +242,8 @@ impl Collector {
             // birth era in the batch. if epoch tracking is disabled
             // this will always be false (0 > 1)
             //
-            // safety: we checked that batch.head != null, therefore batch.tail
-            // is a valid pointer
+            // safety: we checked that batch.head != null, therefore
+            // batch.tail is a valid pointer
             unsafe {
                 if (*batch.tail).reservation.min_epoch > (*node).reservation.birth_epoch {
                     (*batch.tail).reservation.min_epoch = (*node).reservation.birth_epoch;
@@ -282,13 +285,11 @@ impl Collector {
         // if there are not enough nodes in this batch for
         // active threads, we have to try again later
         //
-        // acquire: acquire any threads that were created
+        // acquire: acquire the entries of any active threads
         //
-        // this rdmw operation is necessary to maintain a
-        // total order between the load here and increments
-        // when a new thread is allocated. reading a stale value
-        // could cause us to skip active threads
-        if batch.size <= self.reservations.entries.rdmw(Ordering::Acquire) {
+        // release: ensure any threads that join after see
+        // the new values of the pointers that were retired
+        if batch.size <= self.reservations.threads.rdmw(Ordering::AcqRel) {
             return;
         }
 
@@ -309,13 +310,10 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
-            // acquire: prevent reordering between this operation
-            // and the second load of `head` below
-            //
             // release: release the new value of pointers in this
             // batch for the thread to acquire the next time
             // it changes state (becomes active/inactive)
-            if reservation.head.rdmw(Ordering::AcqRel) == Node::INACTIVE {
+            if reservation.head.rdmw(Ordering::Release) == Node::INACTIVE {
                 continue;
             }
 
@@ -328,19 +326,19 @@ impl Collector {
             // release: release the new value of pointers in this batch
             // for the thread to acquire the next time it loads a pointer
             // and sees it's epoch is out of date
-            if reservation.epoch.rdmw(Ordering::AcqRel) < min_epoch {
+            if reservation.epoch.rdmw(Ordering::Release) < min_epoch {
                 continue;
             }
 
-            // we don't have enough nodes to insert into the reservation lists
-            // of all active threads, try again later
+            // we don't have enough nodes to insert into the reservation
+            // lists of all active threads, try again later
             if last == batch.tail {
                 return;
             }
 
             // safety: we checked that this is not the last node
-            // in the batch list above, so we can never access
-            // an invalid node
+            // in the batch list above, and all nodes in a batch
+            // are valid
             unsafe {
                 (*last).reservation.head = &reservation.head;
                 last = (*last).batch.next;
@@ -360,11 +358,10 @@ impl Collector {
             loop {
                 // the thread became inactive, skip it.
                 //
-                // note that this does not have to be an RMW
-                // load because as long as the thread became
-                // inactive at some point after  we verified
-                // it was active, it can no longer access the
-                // pointer
+                // as long as the thread became inactive at some point
+                // after we verified it was active, it can no longer access
+                // the pointer as it must have acquired the new values
+                // that we released through `head`
                 if prev == Node::INACTIVE {
                     break;
                 }
@@ -525,11 +522,13 @@ impl Drop for Collector {
     }
 }
 
-// Node is attached to every allocated object
+// A node is attached to every allocated object
 //
 // When a node is retired, it becomes one of two types:
-// - REFS: the first node in a batch (tail of the list), holds the reference count
-// - SLOT: Everyone else
+//
+// - REFS: the first node in a batch (tail of the list),
+//   holds the reference count
+// - SLOT: everyone else
 pub struct Node {
     // REFS: first slot node
     // SLOTS: pointer to REFS
@@ -621,6 +620,6 @@ fn at_least_acquire(ordering: Ordering) -> Ordering {
     match ordering {
         Ordering::Acquire => Ordering::Acquire,
         Ordering::SeqCst => Ordering::SeqCst,
-        _ => ordering,
+        _ => Ordering::Acquire,
     }
 }

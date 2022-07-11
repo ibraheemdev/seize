@@ -18,7 +18,7 @@ const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
-    pub entries: AtomicUsize,
+    pub threads: AtomicUsize,
 }
 
 struct Entry<T> {
@@ -61,7 +61,7 @@ where
         ThreadLocal {
             // safety: `AtomicPtr` has the same representation as a pointer
             buckets: unsafe { mem::transmute(buckets) },
-            entries: AtomicUsize::new(0),
+            threads: AtomicUsize::new(0),
         }
     }
 
@@ -105,7 +105,9 @@ where
                 // insert the new element into the bucket
                 entry.value.get().write(MaybeUninit::new(create()));
                 entry.present.store(true, Ordering::Release);
-                self.entries.fetch_add(1, Ordering::AcqRel);
+                // release: release the entry above
+                // acquire: acquire any (pointer) values released through threads
+                self.threads.fetch_add(1, Ordering::AcqRel);
                 (*entry.value.get()).assume_init_ref()
             }
         }
