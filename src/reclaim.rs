@@ -36,6 +36,6 @@ pub unsafe fn boxed<T>(mut link: Link) {
 /// `Linked<T>`.
 pub unsafe fn in_place<T>(mut link: Link) {
     unsafe {
-        let _ = ptr::drop_in_place(link.cast::<T>());
+        ptr::drop_in_place(link.cast::<T>());
     }
 }

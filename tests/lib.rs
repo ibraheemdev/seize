@@ -204,12 +204,12 @@ fn two_threads() {
         unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
     }
 
-    let _ = rx.recv().unwrap(); // wait for thread to access value
+    rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
     let value = guard.protect(&one, Ordering::Acquire);
     unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
 
-    let _ = rx.recv().unwrap(); // wait for thread to drop guard
+    rx.recv().unwrap(); // wait for thread to drop guard
     h.join().unwrap();
 
     drop(guard);
