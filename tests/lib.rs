@@ -9,8 +9,8 @@ use std::thread;
 #[cfg(miri)]
 mod cfg {
     pub const THREADS: usize = 4;
-    pub const ITEMS: usize = 250;
-    pub const ITER: usize = 5;
+    pub const ITEMS: usize = 100;
+    pub const ITER: usize = 1;
 }
 
 #[cfg(not(miri))]
