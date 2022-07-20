@@ -47,7 +47,6 @@ impl Collector {
         // safety: node counts are only accessed by the current thread
         let birth_epoch = unsafe {
             *count += 1;
-            trace!("linked new value, values: {}", *count);
 
             match self.epoch_frequency {
                 Some(ref freq) if *count % freq.get() == 0 => {
@@ -77,7 +76,9 @@ impl Collector {
                 // TODO(ibraheem): this requires that the pointer value
                 // was stored with release ordering, which is not enforced
                 // by the current API
-                _ => self.epoch.load(Ordering::Relaxed),
+                Some(_) => self.epoch.load(Ordering::Relaxed),
+                // if we aren't tracking epochs, this is always false
+                None => 0,
             }
         };
 
