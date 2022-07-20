@@ -10,8 +10,6 @@ mod thread_id;
 use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-
-// TODO: loom doesn't expose get_mut
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;

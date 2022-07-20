@@ -88,11 +88,7 @@ impl Drop for ThreadHolder {
     }
 }
 
-#[cfg(not(loom))]
 thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
-
-#[cfg(loom)]
-loom::thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
 
 /// Get the current thread.
 pub(crate) fn get() -> Thread {

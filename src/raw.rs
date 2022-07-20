@@ -382,7 +382,7 @@ impl Collector {
                         active += 1;
                         break;
                     }
-                    // retry
+                    // lost the race to another thread, retry
                     Err(found) => {
                         prev = found;
                         continue;
