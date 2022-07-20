@@ -2,7 +2,7 @@
 
 [![Crate](https://img.shields.io/crates/v/seize?style=for-the-badge)](https://crates.io/crates/seize)
 [![Github](https://img.shields.io/badge/github-seize-success?style=for-the-badge)](https://github.com/ibraheemdev/seize)
-[![Docs](https://img.shields.io/badge/docs.rs-0.2.4-4d76ae?style=for-the-badge)](https://docs.rs/seize)
+[![Docs](https://img.shields.io/badge/docs.rs-0.2.5-4d76ae?style=for-the-badge)](https://docs.rs/seize)
 
 Fast, efficient, and robust memory reclamation for concurrent data structures.
 
@@ -48,7 +48,7 @@ pointers directly instead of creating safe wrapper types that end up being a
 hassle to work with in practice. Below is a step-by-step guide on how to get
 started.
 
-### Creating Collectors
+### Collectors
 
 Seize avoids the use of global state and encourages creating a designated
 _collector_ per data structure. Collectors allow you to allocate, protect, and
