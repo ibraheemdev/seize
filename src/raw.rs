@@ -315,8 +315,8 @@ impl Collector {
             // batch for the thread to acquire the next time it changes
             // state (becomes active/inactive)
             //
-            // acquire: acquire any new pointers released by other threads
-            // to preserve the release sequence
+            // acquire: if the thread is inactive, synchronize with `leave`
+            // to ensure any accesses happen-before we retire
             if reservation.head.rdmw(Ordering::AcqRel) == Node::INACTIVE {
                 continue;
             }
@@ -330,10 +330,7 @@ impl Collector {
             // release: release the new value of pointers in this batch
             // for the thread to acquire the next time it loads a pointer
             // and sees it's epoch is out of date
-            //
-            // acquire: acquire any new pointers released by other threads
-            // to preserve the release sequence
-            if reservation.epoch.rdmw(Ordering::AcqRel) < min_epoch {
+            if reservation.epoch.rdmw(Ordering::Release) < min_epoch {
                 continue;
             }
 
