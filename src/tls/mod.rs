@@ -10,7 +10,7 @@ mod thread_id;
 use std::cell::UnsafeCell;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
@@ -103,9 +103,16 @@ where
                 // insert the new element into the bucket
                 entry.value.get().write(MaybeUninit::new(create()));
                 entry.present.store(true, Ordering::Release);
-                // release: release the entry above
-                // acquire: acquire any (pointer) values released through threads
-                self.threads.fetch_add(1, Ordering::AcqRel);
+
+                self.threads.fetch_add(1, Ordering::Relaxed);
+
+                // seqcst: synchronize with the fence in `retire`:
+                // - if this fence comes first, the thread retiring will see the new thread count
+                //   and our entry
+                // - if their fence comes first, we will see the new values of any pointers being
+                //   retired by that thread
+                atomic::fence(Ordering::SeqCst);
+
                 (*entry.value.get()).assume_init_ref()
             }
         }
@@ -183,16 +190,13 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // we have to check all the buckets here
-        // because we reuse thread IDs. keeping track
-        // of the number of values and only yielding
-        // that many here wouldn't work, because a new
-        // thread could join and be inserted into a middle
-        // bucket, and we would yield that instead of an
-        // active thread that actually needs to participate
-        // in reference counting. yielding extra values is
-        // fine, but not yielding all originally active
-        // threads is not.
+        // we have to check all the buckets here because we reuse
+        // thread IDs. keeping track of the number of values and only
+        // yielding that many here wouldn't work, because a new thread
+        // could join and be inserted into a middle bucket, and we would
+        // yield that instead of an active thread that actually needs to
+        // participate in reference counting. yielding extra values is fine,
+        // but not yielding all originally active threads is not.
         while self.bucket < BUCKETS {
             let bucket = unsafe {
                 self.thread_local
