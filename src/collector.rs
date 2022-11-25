@@ -161,8 +161,7 @@ impl Collector {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         unsafe {
-            let (should_retire, batch) = self.raw.delayed_retire(ptr, reclaim);
-
+            let (should_retire, batch) = self.raw.add(ptr, reclaim);
             if should_retire {
                 self.raw.retire(batch);
             }
@@ -275,7 +274,7 @@ impl Guard<'_> {
         }
 
         unsafe {
-            let (should_retire, _) = (*self.collector).raw.delayed_retire(ptr, reclaim);
+            let (should_retire, _) = (*self.collector).raw.add(ptr, reclaim);
             *self.should_retire.get() |= should_retire;
         }
     }
