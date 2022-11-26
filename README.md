@@ -191,7 +191,7 @@ impl<T> Stack<T> {
             {
                 unsafe {
                     let data = ptr::read(&(*head).value);
-                    self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+                    self.collector.retire(head, reclaim::Boxed); // <===
                     return Some(ManuallyDrop::into_inner(data));
                 }
             }
@@ -233,11 +233,10 @@ drop(guard); // <===== ptr is invalidated
 
 #### 3. Custom Reclaimers
 
-You probably noticed that `retire` takes a function as a second parameter. This
-function is known as a _reclaimer_, and is run when the collector decides it is
-safe to free the retired object. Typically you will pass in a function from the
-`seize::reclaim` module. For example, values allocated with `Box` can use
-`reclaim::boxed`:
+You probably noticed that `retire` takes a second parameter, a reclaimer. This
+decides what function is run when the collector decides it is safe to free the
+retired object. Typically you will pass in a reclaimer from the `seize::reclaim`
+module. For example, values allocated with `Box` can use `reclaim::Boxed`:
 
 ```rust,ignore
 use seize::reclaim;
@@ -245,16 +244,13 @@ use seize::reclaim;
 impl<T> Stack<T> {
     pub fn pop(&self) -> Option<T> {
         // ...
-        self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+        self.collector.retire(head, reclaim::Boxed); // <===
         // ...
     }
 }
 ```
 
-The type annotation there is important. It is **unsound** to pass a reclaimer of
-a different type than the object being retired.
-
-If you need to run custom reclamation code, you can write a custom reclaimer.
+If you need to run custom reclamation code, you can write a custom reclaimer function.
 Functions passed to `retire` are called with a type-erased `Link`. This is
 because retired values are connected to thread-local batches via linked lists,
 losing any type information. To extract the underlying value from a link, you can

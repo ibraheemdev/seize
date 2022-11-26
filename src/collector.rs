@@ -1,4 +1,5 @@
 use crate::raw;
+use crate::reclaim::Reclaim;
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
@@ -179,26 +180,16 @@ impl Collector {
         Box::into_raw(Box::new(self.link(value)))
     }
 
-    /// Retire an object, running `reclaim` when it is safe to do so.
+    /// Retire an object, running the reclaimer when it is safe to do so.
     ///
-    /// The `reclaim` function will only be called after all currently active threads
+    /// The object will only be reclaimed after all currently active threads
     /// drop their guards, which ensures that the object is no longer being referenced.
-    /// It can either be a function from the [`reclaim`](crate::reclaim) module,
-    /// or a custom reclaimer. For example, objects allocated with [`link_boxed`](Self::link_boxed)
-    /// can use [`reclaim::boxed`](crate::reclaim::boxed):
-    ///
-    /// # Safety
-    ///
-    /// Retiring an object is only sound if:
-    ///
-    /// - The object is no longer accessible to any threads. This generally means a
-    ///   new value must have been stored to the relevant atomic pointer.
-    /// - The object has not already been retired. Retiring the same object multiple
-    ///   times is unsound.
-    /// - The object is not accessed again after the call to `retire`. It's possible
-    ///   that the object is reclaimed immediately, so any references are invalidated.
     ///
     /// # Examples
+    ///
+    /// The reclaimer can either be a type from the [`reclaim`](crate::reclaim) module,
+    /// or a custom reclaimer function. For example, objects allocated with [`link_boxed`](Self::link_boxed)
+    /// can use [`reclaim::Boxed`](crate::reclaim::Boxed):
     ///
     /// ```
     /// use seize::reclaim;
@@ -218,7 +209,7 @@ impl Collector {
     /// }
     /// ```
     ///
-    /// If extra work needs to be done on drop, a custom reclaimer can be used instead.
+    /// If extra work needs to be done on drop, a custom reclaimer function can be used instead.
     /// Custom reclaimers receive the type-erased [`Link`] struct as a parameter, which must
     /// be casted back to the correct type to retreive the original object:
     ///
@@ -239,12 +230,25 @@ impl Collector {
     /// });
     /// # }
     /// ```
-    #[allow(clippy::missing_safety_doc)] // in guide
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    ///
+    /// # Safety
+    ///
+    /// Retiring an object is only sound if:
+    ///
+    /// - The object is no longer accessible to any threads. This generally means a
+    ///   new value must have been stored to the relevant atomic pointer.
+    /// - The object has not already been retired. Retiring the same object multiple
+    ///   times is unsound.
+    /// - The object is not accessed again after the call to `retire`. It's possible
+    ///   that the object is reclaimed immediately, so any references are invalidated.
+    pub unsafe fn retire<T, R>(&self, ptr: *mut Linked<T>, reclaimer: R)
+    where
+        R: Reclaim<T>,
+    {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         unsafe {
-            let (should_retire, batch) = self.raw.add(ptr, reclaim);
+            let (should_retire, batch) = self.raw.add(ptr, reclaimer.reclaimer());
             if should_retire {
                 self.raw.retire(batch);
             }
@@ -374,17 +378,19 @@ impl Guard<'_> {
     ///
     /// This method delays reclamation until the guard is dropped as opposed to
     /// [`Collector::retire`], which may reclaim objects immediately.
-    #[allow(clippy::missing_safety_doc)] // in guide
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn retire<T, R>(&self, ptr: *mut Linked<T>, reclaimer: R)
+    where
+        R: Reclaim<T>,
+    {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         if self.collector.is_null() {
             // unprotected guard
-            return unsafe { (reclaim)(Link { node: ptr as _ }) };
+            return unsafe { (reclaimer.reclaimer())(Link { node: ptr as _ }) };
         }
 
         unsafe {
-            let (should_retire, _) = (*self.collector).raw.add(ptr, reclaim);
+            let (should_retire, _) = (*self.collector).raw.add(ptr, reclaimer.reclaimer());
             *self.retire_batch.get() |= should_retire;
         }
     }

@@ -83,7 +83,7 @@ fn stress() {
                 {
                     unsafe {
                         let data = ptr::read(&(*head).data);
-                        self.collector.retire(head, reclaim::boxed::<Node<T>>);
+                        self.collector.retire(head, reclaim::Boxed);
                         return Some(ManuallyDrop::into_inner(data));
                     }
                 }
@@ -156,7 +156,7 @@ fn single_thread() {
         {
             let guard = collector.enter();
             let value = guard.protect(&zero, Ordering::Acquire);
-            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+            unsafe { collector.retire(value, reclaim::Boxed) }
         }
     }
 
@@ -201,13 +201,13 @@ fn two_threads() {
         let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
         let guard = collector.enter();
         let value = guard.protect(&zero, Ordering::Acquire);
-        unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+        unsafe { collector.retire(value, reclaim::Boxed) }
     }
 
     rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
     let value = guard.protect(&one, Ordering::Acquire);
-    unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+    unsafe { collector.retire(value, reclaim::Boxed) }
 
     rx.recv().unwrap(); // wait for thread to drop guard
     h.join().unwrap();
@@ -256,7 +256,7 @@ fn flush() {
     for i in 0..cfg::ITER {
         for n in nums.iter() {
             let old = n.swap(collector.link_boxed(i), Ordering::AcqRel);
-            unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+            unsafe { collector.retire(old, reclaim::Boxed) }
         }
     }
 
@@ -267,7 +267,7 @@ fn flush() {
     // cleanup
     for n in nums.iter() {
         let old = n.swap(ptr::null_mut(), Ordering::Acquire);
-        unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+        unsafe { collector.retire(old, reclaim::Boxed) }
     }
 }
 
@@ -291,7 +291,7 @@ fn delayed_retire() {
     let guard = collector.enter();
 
     for object in objects {
-        unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+        unsafe { guard.retire(object, reclaim::Boxed) }
     }
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -333,7 +333,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in objects.0 {
-                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.retire(object, reclaim::Boxed) }
             }
         }
     })
@@ -368,7 +368,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in objects.0 {
-                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.retire(object, reclaim::Boxed) }
             }
         }
     })
