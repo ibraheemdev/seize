@@ -64,7 +64,7 @@ mod seize_stack {
 
     impl Stack {
         pub fn new() -> Stack {
-            let collector = Collector::new().epoch_frequency(None);
+            let collector = Collector::new().epoch_tick(None);
 
             Stack {
                 head: ptr::null_mut(),

@@ -22,19 +22,19 @@ pub struct Collector {
     // The number of nodes allocated per-thread
     node_count: ThreadLocal<UnsafeCell<u64>>,
     // The number of node allocations before advancing the global epoch
-    pub(crate) epoch_frequency: Option<NonZeroU64>,
+    pub(crate) epoch_tick: Option<NonZeroU64>,
     // The number of nodes in a batch before we free
     pub(crate) batch_size: usize,
 }
 
 impl Collector {
-    pub fn with_threads(threads: usize, epoch_frequency: NonZeroU64, batch_size: usize) -> Self {
+    pub fn with_threads(threads: usize, epoch_tick: NonZeroU64, batch_size: usize) -> Self {
         Self {
             epoch: AtomicU64::new(1),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             node_count: ThreadLocal::with_capacity(threads),
-            epoch_frequency: Some(epoch_frequency),
+            epoch_tick: Some(epoch_tick),
             batch_size,
         }
     }
@@ -50,7 +50,7 @@ impl Collector {
         // note that it's fine if we see older epoch values here,
         // which just means more threads will be counted as active
         // than might actually be
-        let birth_epoch = match self.epoch_frequency {
+        let birth_epoch = match self.epoch_tick {
             // advance the global epoch
             Some(ref freq) if *count % freq.get() == 0 => {
                 let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -99,7 +99,7 @@ impl Collector {
     // Load an atomic pointer
     #[inline]
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
-        if self.epoch_frequency.is_none() {
+        if self.epoch_tick.is_none() {
             // epoch tracking is disabled, nothing special needed here
             return ptr.load(ordering);
         }
@@ -176,6 +176,10 @@ impl Collector {
         if guards == 1 {
             // release: exit the critical section
             // acquire: acquire any new reservation nodes
+            //
+            // this doesn't have to be seqcst because we aren't transitioning from
+            // inactive to active, we are just cleaning up our local reservation list,
+            // and so aren't required to see some newer set of pointers.
             let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
 
             if head != Node::INACTIVE {
@@ -293,7 +297,7 @@ impl Collector {
             //
             // acquire: if the thread is inactive, synchronize with `leave`
             // to ensure any accesses happen-before we retire
-            if reservation.head.load(Ordering::Acquire) == Node::INACTIVE {
+            if reservation.head.load(Ordering::Relaxed) == Node::INACTIVE {
                 continue;
             }
 
@@ -302,7 +306,7 @@ impl Collector {
             // have accessed any of the pointers in this batch
             //
             // if epoch tracking is disabled this is always false (0 < 0)
-            if reservation.epoch.load(Ordering::Acquire) < min_epoch {
+            if reservation.epoch.load(Ordering::Relaxed) < min_epoch {
                 continue;
             }
 
@@ -367,7 +371,6 @@ impl Collector {
                     Err(found) => {
                         // acquire the new reservation loads
                         atomic::fence(Ordering::Acquire);
-
                         prev = found;
                         continue;
                     }

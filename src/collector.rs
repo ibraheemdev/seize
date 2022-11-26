@@ -8,7 +8,7 @@ use std::{fmt, ptr};
 
 /// Fast, efficient, and robust memory reclamation.
 ///
-/// See the [crate documentation](crate) for details.
+/// See the [crate documentation](crate) for an introductory guide.
 pub struct Collector {
     raw: raw::Collector,
     unique: *mut u8,
@@ -35,33 +35,32 @@ impl Collector {
 
     /// Sets the frequency of epoch advancement.
     ///
-    /// Seize uses epochs to protect against stalled threads.
+    /// Collectors use epochs to protect against stalled threads.
     /// The more frequently the epoch is advanced, the faster
     /// stalled threads can be detected. However, it also means
-    /// that threads will have to do work to catch up to the
-    /// current epoch more often.
+    /// that threads will have to do more work to catch up to the
+    /// current epoch.
     ///
-    /// The default epoch frequency is `110`, meaning that
-    /// the epoch will advance after every 110 values are
-    /// linked to the collector. Benchmarking has shown that
-    /// this is a good tradeoff between throughput and memory
-    /// efficiency.
+    /// The default epoch tick is 110, meaning that the epoch
+    /// will advance after every 110 objects are linked to the collector.
+    /// Benchmarking has shown that this is a good tradeoff between
+    /// throughput and memory efficiency.
     ///
-    /// If `None` is passed epoch tracking, and protection
-    /// against stalled threads, will be disabled completely.
-    pub fn epoch_frequency(mut self, n: Option<NonZeroU64>) -> Self {
-        self.raw.epoch_frequency = n;
+    /// If `None` is passed to this function, epoch tracking, and protection against
+    /// stalled threads, will be disabled completely.
+    pub fn epoch_tick(mut self, tick: Option<NonZeroU64>) -> Self {
+        self.raw.epoch_tick = tick;
         self
     }
 
-    /// Sets the number of values that must be in a batch
+    /// Sets the number of objects that must be in a batch
     /// before reclamation is attempted.
     ///
-    /// Retired values are added to thread-local *batches*
-    /// before completing their actual retirement. After
-    /// `batch_size` is hit, values are moved to separate
-    /// *retirement lists*, where reference counting kicks
-    /// in and batches are eventually reclaimed.
+    /// Retired objects are added to thread-local batches
+    /// before the retirement process is actually started. After
+    /// `batch_size` is hit, objects are moved to separate retirement
+    /// lists, where reference counting kicks in and batches are
+    /// eventually reclaimed.
     ///
     /// A larger batch size means that deallocation is done
     /// less frequently, but reclamation also becomes more
@@ -69,42 +68,37 @@ impl Collector {
     /// to be traversed and freed.
     ///
     /// Note that batch sizes should generally be larger
-    /// than the number of threads accessing objects.
-    ///
-    /// The default batch size is `120`. Tests have shown that
-    /// this makes a good tradeoff between throughput and memory
-    /// efficiency.
-    pub fn batch_size(mut self, n: usize) -> Self {
-        self.raw.batch_size = n;
+    /// than the number of threads accessing objects. The default batch
+    /// size is `120` nodes.
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.raw.batch_size = size;
         self
     }
 
-    /// Marks the current thread as active, returning a guard
+    /// Mark the current thread as active, returning a guard
     /// that allows protecting loads of atomic pointers. The thread
     /// will be marked as inactive when the guard is dropped.
     ///
-    /// See [the guide](crate#starting-operations) for an introduction
-    /// to using guards.
-    ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```
     /// # use seize::AtomicPtr;
     /// # use std::sync::atomic::Ordering;
     /// # let collector = seize::Collector::new();
-    /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
-    ///
+    /// # let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
-    /// unsafe { assert_eq!(**value, 1) }
+    /// println!("{}", **value);
+    /// drop(guard);
+    /// // accessing `value` after this is **unsound**
     /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
     /// ```
     ///
-    /// Note that `enter` is reentrant, and it is legal to create
-    /// multiple guards on the same thread. The thread will stay
-    /// marked as active until the last guard is dropped:
+    /// `enter` is reentrant, so it is legal to create multiple guards
+    /// on the same thread. The thread will stay marked as active until
+    /// the last guard is dropped:
     ///
-    /// ```rust
+    /// ```
     /// # use seize::AtomicPtr;
     /// # use std::sync::atomic::Ordering;
     /// # let collector = seize::Collector::new();
@@ -115,9 +109,8 @@ impl Collector {
     ///
     /// let value = guard2.protect(&ptr, Ordering::Acquire);
     /// drop(guard1);
-    /// // the first guard is dropped, but `value`
-    /// // is still safe to access as a guard still
-    /// // exists
+    /// // the first guard is dropped, but `value` is still safe to access
+    /// // while the second guard exists
     /// unsafe { assert_eq!(**value, 1) }
     /// # unsafe { guard2.retire(value, seize::reclaim::boxed::<usize>) };
     /// drop(guard2) // _now_, the thread is marked as inactive
@@ -127,14 +120,45 @@ impl Collector {
 
         Guard {
             collector: self,
-            should_retire: UnsafeCell::new(false),
+            retire_batch: UnsafeCell::new(false),
             _a: PhantomData,
         }
     }
 
-    /// Link a value to the collector.
+    /// Link an object to the collector.
     ///
-    /// See [the guide](crate#allocating-objects) for details.
+    /// Collectors require reserving some extra memory for each object
+    /// that is allocated, so atomic pointers must take the form of
+    /// `AtomicPtr<Linked<T>>`, as opposed to `AtomicPtr<T>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use seize::{Collector, Linked};
+    /// # use std::mem::ManuallyDrop;
+    /// # use std::sync::atomic::{AtomicPtr, Ordering};
+    ///
+    /// pub struct Stack<T> {
+    ///     head: AtomicPtr<Linked<Node<T>>>,
+    ///     collector: Collector,
+    /// }
+    ///
+    /// struct Node<T> {
+    ///     next: *mut Linked<Node<T>>,
+    ///     value: T,
+    /// }
+    ///
+    /// impl<T> Stack<T> {
+    ///     pub fn push(&self, value: T) {
+    ///         let node = self.collector.link(Node {
+    ///             next: std::ptr::null_mut(),
+    ///             value,
+    ///         });
+    ///
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
     pub fn link<T>(&self, value: T) -> Linked<T> {
         Linked {
             value,
@@ -142,20 +166,79 @@ impl Collector {
         }
     }
 
-    /// Links a value to the collector and allocates it.
+    /// Link an object to the collector and allocate it.
     ///
     /// This is equivalent to:
     ///
-    /// ```ignore
+    /// ```
+    /// # let collector = seize::Collector::new();
+    /// # let value = 0;
     /// Box::into_raw(Box::new(collector.link(value)))
     /// ```
     pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
         Box::into_raw(Box::new(self.link(value)))
     }
 
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    /// Retire an object, running `reclaim` when it is safe to do so.
     ///
-    /// See [the guide](crate#retiring-objects) for details.
+    /// The `reclaim` function will only be called after all currently active threads
+    /// drop their guards, which ensures that the object is no longer being referenced.
+    /// It can either be a function from the [`reclaim`](crate::reclaim) module,
+    /// or a custom reclaimer. For example, objects allocated with [`link_boxed`](Self::link_boxed)
+    /// can use [`reclaim::boxed`](crate::reclaim::boxed):
+    ///
+    /// # Safety
+    ///
+    /// Retiring an object is only sound if:
+    ///
+    /// - The object is no longer accessible to any threads. This generally means a
+    ///   new value must have been stored to the relevant atomic pointer.
+    /// - The object has not already been retired. Retiring the same object multiple
+    ///   times is unsound.
+    /// - The object is not accessed again after the call to `retire`. It's possible
+    ///   that the object is reclaimed immediately, so any references are invalidated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use seize::reclaim;
+    /// # struct Stack<T> { collector: seize::Collector, _t: T }
+    /// # struct Node<T>(T);
+    ///
+    /// impl<T> Stack<T> {
+    ///     fn pop(&self) -> Option<T> {
+    ///         # let t = unsafe { std::mem::transmute(()) }; // ¯\_(ツ)_/¯
+    ///         # let head = self.collector.link_boxed(Node(t));
+    ///         // ...
+    ///         unsafe {
+    ///             self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+    ///         }
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// If extra work needs to be done on drop, a custom reclaimer can be used instead.
+    /// Custom reclaimers receive the type-erased [`Link`] struct as a parameter, which must
+    /// be casted back to the correct type to retreive the original object:
+    ///
+    /// ```
+    /// # let collector = seize::Collector::new();
+    /// # struct Node<T>(T);
+    /// # fn x<T>(head: Node<T>) {
+    /// collector.retire(head, |link: Link| unsafe {
+    ///     // safety: the value passed to retire was of type `*mut Linked<Node<T>>`
+    ///     let ptr: *mut Linked<Node<T>> = link.cast::<Node<T>>();
+    ///
+    ///     // safety: the value was allocated with `link_boxed`
+    ///     let head = Box::from_raw(ptr);
+    ///     # let head = 1;
+    ///     println!("dropping {}", head);
+    ///
+    ///     drop(head);
+    /// });
+    /// # }
+    /// ```
     #[allow(clippy::missing_safety_doc)] // in guide
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
@@ -169,6 +252,16 @@ impl Collector {
     }
 
     /// Returns true if both references point to the same collector.
+    ///
+    /// ```
+    /// use seize::Collector;
+    ///
+    /// let a = Collector::new();
+    /// let b = Collector::new();
+    ///
+    /// assert!(Collector::ptr_eq(&a, &a));
+    /// assert!(!Collector::ptr_eq(&a, &b));
+    /// ```
     pub fn ptr_eq(this: &Collector, other: &Collector) -> bool {
         ptr::eq(this.unique, other.unique)
     }
@@ -186,7 +279,7 @@ impl Clone for Collector {
     fn clone(&self) -> Self {
         Collector::new()
             .batch_size(self.raw.batch_size)
-            .epoch_frequency(self.raw.epoch_frequency)
+            .epoch_tick(self.raw.epoch_tick)
     }
 }
 
@@ -200,24 +293,23 @@ impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut strukt = f.debug_struct("Collector");
 
-        if self.raw.epoch_frequency.is_some() {
+        if self.raw.epoch_tick.is_some() {
             strukt.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
         }
 
         strukt
             .field("batch_size", &self.raw.batch_size)
-            .field("epoch_frequency", &self.raw.epoch_frequency)
+            .field("epoch_frequency", &self.raw.epoch_tick)
             .finish()
     }
 }
 
-/// A guard that keeps the current thread marked as active,
-/// enabling protected loads of atomic pointers.
+/// A guard that keeps the current thread marked as active.
 ///
 /// See [`Collector::enter`] for details.
 pub struct Guard<'a> {
     collector: *const Collector,
-    should_retire: UnsafeCell<bool>,
+    retire_batch: UnsafeCell<bool>,
     _a: PhantomData<&'a Collector>,
 }
 
@@ -240,14 +332,34 @@ impl Guard<'_> {
     pub const unsafe fn unprotected() -> Guard<'static> {
         Guard {
             collector: ptr::null(),
-            should_retire: UnsafeCell::new(false),
+            retire_batch: UnsafeCell::new(false),
             _a: PhantomData,
         }
     }
 
     /// Protects the load of an atomic pointer.
     ///
-    /// See [the guide](crate#protecting-pointers) for details.
+    /// Any valid pointer loaded through `protect` is guaranteed to stay valid
+    /// until this guard is dropped, or the object is retired.
+    ///
+    /// Note that the lifetime of a guarded pointer is logically tied to that of
+    /// the guard – when the guard is dropped the pointer is invalidated – but a
+    /// raw pointer is returned for convenience. Datastructures that return shared
+    /// references to objects should ensure that the lifetime of the reference is tied
+    /// to the lifetime of a guard.
+    ///
+    /// ```
+    /// # use seize::AtomicPtr;
+    /// # use std::sync::atomic::Ordering;
+    /// # let collector = seize::Collector::new();
+    /// # let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
+    /// let guard = collector.enter();
+    /// let value = guard.protect(&ptr, Ordering::Acquire);
+    /// println!("{}", **value);
+    /// drop(guard);
+    /// // accessing `value` after this is **unsound**
+    /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
+    /// ```
     #[inline]
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
         if self.collector.is_null() {
@@ -262,8 +374,6 @@ impl Guard<'_> {
     ///
     /// This method delays reclamation until the guard is dropped as opposed to
     /// [`Collector::retire`], which may reclaim objects immediately.
-    ///
-    /// See [the guide](crate#retiring-objects) for details.
     #[allow(clippy::missing_safety_doc)] // in guide
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
@@ -275,13 +385,13 @@ impl Guard<'_> {
 
         unsafe {
             let (should_retire, _) = (*self.collector).raw.add(ptr, reclaim);
-            *self.should_retire.get() |= should_retire;
+            *self.retire_batch.get() |= should_retire;
         }
     }
 
     /// Get a reference to the collector this guard we created from.
     ///
-    /// This method is useful when you need to ensure that all guards
+    /// This method is useful if you need to ensure that all guards
     /// used with a data structure come from the same collector.
     ///
     /// If this is an [`unprotected`](Guard::unprotected) guard
@@ -303,14 +413,12 @@ impl Guard<'_> {
     ///
     /// # Safety
     ///
-    /// This method is not marked as `unsafe`, but will affect
-    /// the validity of pointers returned by [`protect`](Guard::protect),
-    /// similar to dropping a guard. It is intended to be used safely
-    /// by users of concurrent data structures, as references will
-    /// be tied to the guard and this method takes `&mut self`.
+    /// This method is not marked as `unsafe`, but will invalidate any
+    /// previously protected pointers, similar to dropping a guard. It
+    /// is intended to be used safely by users of concurrent data structures,
+    /// as references will be tied to the guard and this method takes `&mut self`.
     ///
-    /// If this is an [`unprotected`](Guard::unprotected) guard
-    /// this method will be a no-op.
+    /// If called on an [`unprotected`](Guard::unprotected) guard this method is a no-op.
     pub fn flush(&mut self) {
         if self.collector.is_null() {
             return;
@@ -329,7 +437,7 @@ impl Drop for Guard<'_> {
         unsafe {
             (*self.collector).raw.leave();
 
-            if *self.should_retire.get() {
+            if *self.retire_batch.get() {
                 (*self.collector).raw.retire_batch();
             }
         }
@@ -342,9 +450,7 @@ impl fmt::Debug for Guard<'_> {
     }
 }
 
-/// The link part of a [`Linked<T>`].
-///
-/// See [the guide](crate#3-reclaimers) for details.
+/// A type-erased [`Linked<T>`].
 pub struct Link {
     pub(crate) node: *mut raw::Node,
 }
@@ -366,8 +472,6 @@ impl Link {
 /// inner value, so you can access methods on fields
 /// on it as normal. An extra `*` may be needed when
 /// `T` needs to be accessed directly.
-///
-/// See [the guide](crate#allocating-objects) for details.
 #[repr(C)]
 pub struct Linked<T> {
     pub(crate) node: UnsafeCell<raw::Node>, // Safety Invariant: this field must come first
@@ -375,6 +479,7 @@ pub struct Linked<T> {
 }
 
 impl<T> Linked<T> {
+    /// Unwraps the inner value.
     pub fn into_inner(linked: Linked<T>) -> T {
         linked.value
     }

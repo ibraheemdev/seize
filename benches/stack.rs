@@ -90,7 +90,7 @@ mod seize_stack {
         pub fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new().epoch_frequency(None),
+                collector: Collector::new().epoch_tick(None),
             }
         }
 

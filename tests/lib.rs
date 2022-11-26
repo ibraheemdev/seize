@@ -312,7 +312,7 @@ fn reentrant() {
         }
     }
 
-    let collector = Arc::new(Collector::new().batch_size(5).epoch_frequency(None));
+    let collector = Arc::new(Collector::new().batch_size(5).epoch_tick(None));
     let dropped = Arc::new(AtomicUsize::new(0));
 
     let objects: UnsafeSend<Vec<_>> = UnsafeSend(
