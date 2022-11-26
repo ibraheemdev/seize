@@ -210,7 +210,7 @@ where
                     let entry = unsafe { &*bucket.add(self.index) };
                     self.index += 1;
                     if entry.present.load(Ordering::Acquire) {
-                        return Some(unsafe { &*(&*entry.value.get()).as_ptr() });
+                        return Some(unsafe { &*(*entry.value.get()).as_ptr() });
                     }
                 }
             }
