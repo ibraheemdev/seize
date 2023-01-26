@@ -4,9 +4,10 @@
 //! to free allocated memory or run drop glue. See [the guide](crate#3-retiring-objects)
 //! for details about memory reclamation and writing custom reclaimers.
 
+use std::marker::PhantomData;
 use std::ptr;
 
-use crate::Link;
+use crate::{Link, Linked};
 
 /// A reclaimer decides what function is run to reclaim an object.
 ///
@@ -18,11 +19,42 @@ pub trait Reclaim<T> {
     fn reclaimer(self) -> unsafe fn(Link);
 }
 
-impl<T> Reclaim<T> for unsafe fn(Link) {
-    fn reclaimer(self) -> unsafe fn(Link) {
-        self
+pub struct Custom<T> {
+    erased: unsafe fn(Link),
+    _t: PhantomData<T>,
+}
+
+impl<T> Custom<T> {
+    #[doc(hidden)]
+    pub fn __new_unsafe(_proof: unsafe fn(*mut Linked<T>), erased: unsafe fn(Link)) -> Self {
+        Self {
+            erased,
+            _t: PhantomData,
+        }
     }
 }
+
+impl<T> Reclaim<T> for Custom<T> {
+    fn reclaimer(self) -> unsafe fn(Link) {
+        self.erased
+    }
+}
+
+#[macro_export]
+macro_rules! custom {
+    (|$val:pat| $body:expr) => {
+        $crate::reclaim::Custom::__new_unsafe(
+            |$val| $body,
+            |mut link| {
+                let val: *mut Linked<_> = unsafe { link.cast() };
+                (|$val| $body)(val)
+            },
+        )
+    };
+}
+
+#[doc(inline)]
+pub use crate::custom;
 
 /// Reclaims memory allocated with [`Box`].
 ///

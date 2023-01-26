@@ -407,3 +407,24 @@ fn collector_eq() {
     ));
     assert!(unprotected.collector().is_none());
 }
+
+#[test]
+fn custom_reclaim() {
+    let collector = Collector::new();
+    let a = collector.link_boxed(1_usize);
+    unsafe {
+        let reclaim = reclaim::custom!(|a| {
+            let _: Box<Linked<usize>> = Box::from_raw(a);
+        });
+
+        collector.retire(a, reclaim);
+    }
+
+    fn _capture_generics<T>(x: *mut Linked<T>, collector: &Collector) {
+        let reclaim = reclaim::custom!(|x| {
+            let _: Box<Linked<T>> = unsafe { Box::from_raw(x) };
+        });
+
+        unsafe { collector.retire(x, reclaim) };
+    }
+}

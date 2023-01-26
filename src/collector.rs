@@ -89,10 +89,10 @@ impl Collector {
     /// # let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
-    /// println!("{}", **value);
+    /// unsafe { println!("{}", *value) };
     /// drop(guard);
     /// // accessing `value` after this is **unsound**
-    /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { collector.retire(value, seize::reclaim::Boxed) };
     /// ```
     ///
     /// `enter` is reentrant, so it is legal to create multiple guards
@@ -113,7 +113,7 @@ impl Collector {
     /// // the first guard is dropped, but `value` is still safe to access
     /// // while the second guard exists
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard2.retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { guard2.retire(value, seize::reclaim::Boxed) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     pub fn enter(&self) -> Guard<'_> {
@@ -174,7 +174,9 @@ impl Collector {
     /// ```
     /// # let collector = seize::Collector::new();
     /// # let value = 0;
+    /// # let _ = {
     /// Box::into_raw(Box::new(collector.link(value)))
+    /// # };
     /// ```
     pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
         Box::into_raw(Box::new(self.link(value)))
@@ -198,13 +200,14 @@ impl Collector {
     ///
     /// impl<T> Stack<T> {
     ///     fn pop(&self) -> Option<T> {
-    ///         # let t = unsafe { std::mem::transmute(()) }; // ¯\_(ツ)_/¯
+    ///         # let t: T = unsafe { std::mem::transmute_copy(&()) }; // ¯\_(ツ)_/¯
     ///         # let head = self.collector.link_boxed(Node(t));
     ///         // ...
     ///         unsafe {
-    ///             self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+    ///             self.collector.retire(head, reclaim::Boxed); // <===
     ///         }
     ///         // ...
+    ///         # None
     ///     }
     /// }
     /// ```
@@ -214,20 +217,18 @@ impl Collector {
     /// be casted back to the correct type to retreive the original object:
     ///
     /// ```
-    /// # let collector = seize::Collector::new();
-    /// # struct Node<T>(T);
-    /// # fn x<T>(head: Node<T>) {
-    /// collector.retire(head, |link: Link| unsafe {
-    ///     // safety: the value passed to retire was of type `*mut Linked<Node<T>>`
-    ///     let ptr: *mut Linked<Node<T>> = link.cast::<Node<T>>();
+    /// use seize::{Linked, Link, reclaim};
     ///
+    /// # struct Node<T>(T);
+    /// # unsafe fn x<T>(head: *mut Linked<Node<T>>, collector: seize::Collector) {
+    /// collector.retire(head, reclaim::custom!(|ptr| unsafe {
     ///     // safety: the value was allocated with `link_boxed`
-    ///     let head = Box::from_raw(ptr);
+    ///     let head: Box<Linked<Node<T>>> = Box::from_raw(ptr);
     ///     # let head = 1;
     ///     println!("dropping {}", head);
     ///
     ///     drop(head);
-    /// });
+    /// }));
     /// # }
     /// ```
     ///
@@ -359,10 +360,10 @@ impl Guard<'_> {
     /// # let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
-    /// println!("{}", **value);
+    /// unsafe { println!("{}", *value) };
     /// drop(guard);
     /// // accessing `value` after this is **unsound**
-    /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { collector.retire(value, seize::reclaim::Boxed) };
     /// ```
     #[inline]
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
