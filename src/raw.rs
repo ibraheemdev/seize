@@ -100,8 +100,9 @@ impl Collector {
     #[inline]
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
         if self.epoch_frequency.is_none() {
-            // epoch tracking is disabled, nothing special needed here
-            return ptr.load(ordering);
+            // epoch tracking is disabled, but pointer loads still need to be seqcst to participate
+            // in the total order. see `enter` for details
+            return ptr.load(Ordering::SeqCst);
         }
 
         let reservation = self.reservations.get_or(Default::default);
