@@ -291,10 +291,7 @@ impl Collector {
         // make sure we have enough reservation nodes, as the number of threads can grow
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
-            //
-            // acquire: if the thread is inactive, synchronize with `leave`
-            // to ensure any accesses happen-before we retire
-            if reservation.head.load(Ordering::Acquire) == Node::INACTIVE {
+            if reservation.head.load(Ordering::Relaxed) == Node::INACTIVE {
                 continue;
             }
 
@@ -303,7 +300,7 @@ impl Collector {
             // have accessed any of the pointers in this batch
             //
             // if epoch tracking is disabled this is always false (0 < 0)
-            if reservation.epoch.load(Ordering::Acquire) < min_epoch {
+            if reservation.epoch.load(Ordering::Relaxed) < min_epoch {
                 continue;
             }
 
@@ -368,7 +365,6 @@ impl Collector {
                     Err(found) => {
                         // acquire the new reservation loads
                         atomic::fence(Ordering::Acquire);
-
                         prev = found;
                         continue;
                     }
@@ -425,13 +421,6 @@ impl Collector {
             let tail = unsafe { (*curr).batch_link };
 
             // safety: TAIL nodes store the reference count of the batch
-            //
-            // acquire: if we free the list, acquire any
-            // modifications to the data released by the threads
-            // that decremented the count
-            //
-            // release: if we don't free the list, release any
-            // modifications to the data to the thread that will
             unsafe {
                 // release: if we don't free the list, release any modifications of
                 // the data to the thread that will
