@@ -32,11 +32,11 @@ Seize is based on the [hyaline reclamation scheme], which uses reference countin
 to determine when it is safe to free memory. However, reference counters are only
 used for objects that have been retired, allowing it to avoid the high overhead
 incurred by traditional reference counting schemes where every memory access requires
-modifying shared memory. Performance is typically on par with or better than epoch based
-schemes, while memory efficiency is similar to hazard pointers. Reclamation is naturally
+modifying shared memory. Performance is competitive with that of epoch based schemes, 
+while memory efficiency is similar to hazard pointers. Reclamation is naturally
 balanced as the thread with the last reference to an object is the one that frees it.
-Epochs are also tracked to protect against stalled threads, making reclamation truly
-lock-free.
+Epochs can also be optionally tracked to protect against stalled threads, making reclamation
+truly lock-free.
 
 Seize is compatible with all modern hardware that supports single-word atomic
 operations such as FAA and CAS.

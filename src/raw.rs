@@ -292,8 +292,7 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
-            // relaxed: if the thread is active, we have nothing to synchronize with
-            // as this batch will be added to it's reservation list
+            // relaxed: see the acquire fence below
             if reservation.head.load(Ordering::Relaxed) == Node::INACTIVE {
                 continue;
             }
@@ -304,7 +303,7 @@ impl Collector {
             //
             // relaxed: if the epoch is behind there is nothing to synchronize with, and
             // we already ensured we will see it's relevant epoch with the seqcst fence
-            // above.
+            // above
             //
             // if epoch tracking is disabled this is always false (0 < 0)
             if reservation.epoch.load(Ordering::Relaxed) < min_epoch {
@@ -387,7 +386,7 @@ impl Collector {
         // relaxed: if we don't free the list, all accesses to the data are released by the
         // seqcst fence above
         if ref_count
-            .fetch_add(active, Ordering::Release)
+            .fetch_add(active, Ordering::Relaxed)
             .wrapping_add(active)
             == 0
         {
