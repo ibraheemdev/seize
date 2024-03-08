@@ -332,7 +332,7 @@ fn reentrant() {
 
         move || {
             let guard = collector.enter();
-            for object in objects.0 {
+            for object in { objects }.0 {
                 unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
@@ -367,7 +367,7 @@ fn reentrant() {
 
         move || {
             let guard = collector.enter();
-            for object in objects.0 {
+            for object in { objects }.0 {
                 unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
