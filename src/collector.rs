@@ -298,16 +298,11 @@ impl Guard<'_> {
         unsafe { self.collector.as_ref() }
     }
 
-    /// Flush any previous reservations.
+    /// Refreshes the guard.
     ///
-    /// This method notifies other threads that the current thread
-    /// is no longer holding on to any protected pointers. If
-    /// the current thread holds the last reference to any
-    /// retired pointers, they will be reclaimed.
-    ///
-    /// The only difference between flushing and dropping a guard is
-    /// that the current thread stays marked as active, meaning new pointers
-    /// can be protected after a call to `flush`.
+    /// Refreshing a guard is similar to dropping and immediately
+    /// creating a new guard. The curent thread remains active, but any
+    /// pointers that were previously protected may be reclaimed.
     ///
     /// # Safety
     ///
@@ -319,12 +314,12 @@ impl Guard<'_> {
     ///
     /// If this is an [`unprotected`](Guard::unprotected) guard
     /// this method will be a no-op.
-    pub fn flush(&mut self) {
+    pub fn refresh(&mut self) {
         if self.collector.is_null() {
             return;
         }
 
-        unsafe { (*self.collector).raw.flush() }
+        unsafe { (*self.collector).raw.refresh() }
     }
 }
 

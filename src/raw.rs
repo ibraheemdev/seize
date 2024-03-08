@@ -160,7 +160,7 @@ impl Collector {
     }
 
     // Decrement any reference counts, keeping the thread marked as active.
-    pub unsafe fn flush(&self) {
+    pub unsafe fn refresh(&self) {
         let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
 

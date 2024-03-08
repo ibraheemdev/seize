@@ -224,7 +224,7 @@ fn two_threads() {
 }
 
 #[test]
-fn flush() {
+fn refresh() {
     let collector = Arc::new(Collector::new().batch_size(3));
 
     let nums = (0..cfg::ITEMS)
@@ -246,7 +246,7 @@ fn flush() {
                             unsafe { assert!(**n < 10_000) }
                         }
 
-                        guard.flush();
+                        guard.refresh();
                     }
                 }
             })
@@ -376,14 +376,14 @@ fn reentrant() {
     .unwrap();
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    guard1.flush();
+    guard1.refresh();
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     drop(guard1);
-    guard2.flush();
+    guard2.refresh();
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     drop(guard2);
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    guard3.flush();
+    guard3.refresh();
     assert_eq!(dropped.load(Ordering::Relaxed), 5);
 }
 
