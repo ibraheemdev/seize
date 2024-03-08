@@ -133,11 +133,11 @@ fn stress() {
 
 #[test]
 fn single_thread() {
-    struct Foo(usize, Arc<AtomicUsize>);
+    struct Foo(Arc<AtomicUsize>);
 
     impl Drop for Foo {
         fn drop(&mut self) {
-            self.1.fetch_add(1, Ordering::Release);
+            self.0.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -146,7 +146,7 @@ fn single_thread() {
     let dropped = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..22 {
-        let zero = AtomicPtr::new(collector.link_boxed(Foo(0, dropped.clone())));
+        let zero = AtomicPtr::new(collector.link_boxed(Foo(dropped.clone())));
 
         {
             let guard = collector.enter();
@@ -165,11 +165,11 @@ fn single_thread() {
 
 #[test]
 fn two_threads() {
-    struct Foo(usize, Arc<AtomicBool>);
+    struct Foo(Arc<AtomicBool>);
 
     impl Drop for Foo {
         fn drop(&mut self) {
-            self.1.store(true, Ordering::Release);
+            self.0.store(true, Ordering::Release);
         }
     }
 
@@ -181,7 +181,7 @@ fn two_threads() {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let one = Arc::new(AtomicPtr::new(
-        collector.link_boxed(Foo(1, one_dropped.clone())),
+        collector.link_boxed(Foo(one_dropped.clone())),
     ));
 
     let h = std::thread::spawn({
@@ -198,7 +198,7 @@ fn two_threads() {
     });
 
     for _ in 0..2 {
-        let zero = AtomicPtr::new(collector.link_boxed(Foo(0, zero_dropped.clone())));
+        let zero = AtomicPtr::new(collector.link_boxed(Foo(zero_dropped.clone())));
         let guard = collector.enter();
         let value = guard.protect(&zero, Ordering::Acquire);
         unsafe { collector.retire(value, reclaim::boxed::<Foo>) }

@@ -241,7 +241,7 @@ impl Collector {
     // Attempt to retire nodes in this batch.
     //
     // Note that if a guard on the current thread is active, the batch will also be added to it's reservation
-    // list for deffered reclamation.
+    // list for deferred reclamation.
     pub fn try_retire(&self, batch: &mut Batch) {
         // establish a total order between the retirement of nodes in this batch and stores
         // marking a thread as active (or active in an epoch):
