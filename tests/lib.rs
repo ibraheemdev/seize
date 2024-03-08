@@ -291,7 +291,7 @@ fn delayed_retire() {
     let guard = collector.enter();
 
     for object in objects {
-        unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+        unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
     }
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -333,7 +333,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
     })
@@ -368,7 +368,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
     })

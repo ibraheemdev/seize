@@ -101,7 +101,7 @@ impl Collector {
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard.retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { guard.defer_retire(value, seize::reclaim::boxed::<usize>) };
     /// ```
     ///
     /// Note that `enter` is reentrant, and it is legal to create
@@ -123,7 +123,7 @@ impl Collector {
     /// // is still safe to access as a guard still
     /// // exists
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard2.retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { guard2.defer_retire(value, seize::reclaim::boxed::<usize>) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     pub fn enter(&self) -> Guard<'_> {
@@ -158,6 +158,10 @@ impl Collector {
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    ///
+    /// Note that this method is disconnected from any guards on the current thread,
+    /// so the pointer may be reclaimed immediately. See [`Guard::defer_retire`] if
+    /// the pointer may still be accessed by the current thread.
     ///
     /// See [the guide](crate#retiring-objects) for details.
     #[allow(clippy::missing_safety_doc)] // in guide
@@ -269,7 +273,7 @@ impl Guard<'_> {
     ///
     /// See [the guide](crate#retiring-objects) for details.
     #[allow(clippy::missing_safety_doc)] // in guide
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn defer_retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         if self.collector.is_null() {

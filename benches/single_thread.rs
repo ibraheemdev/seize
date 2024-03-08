@@ -94,7 +94,7 @@ mod seize_stack {
 
                 self.head = (*head).next;
 
-                guard.retire(head, |mut link| {
+                guard.defer_retire(head, |mut link| {
                     let head = link.cast::<Node>();
                     assert!(!head.is_null());
                     assert!((*head).data == Some(1));

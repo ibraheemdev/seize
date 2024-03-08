@@ -221,12 +221,12 @@ collector.retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== unsound!
 ```
 
-Retirement can be delayed until the guard is dropped by calling `retire` on
+Retirement can be delayed until the guard is dropped by calling `defer_retire` on
 the guard, instead of on the collector directly:
 
 ```rust,ignore
 let ptr = guard.protect(&node, Ordering::Acquire);
-guard.retire(ptr, |_| {});
+guard.defer_retire(ptr, |_| {});
 println!("{}", (*ptr).value); // <===== ok!
 drop(guard); // <===== ptr is invalidated
 ```
