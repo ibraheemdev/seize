@@ -96,12 +96,14 @@ where
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
 
-            // read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
+            // relaxed: only this thread can set the value
+            if entry.present.load(Ordering::Relaxed) {
                 (*entry.value.get()).assume_init_ref()
             } else {
                 // insert the new element into the bucket
                 entry.value.get().write(MaybeUninit::new(create()));
+
+                // release: necessary for iterator
                 entry.present.store(true, Ordering::Release);
 
                 self.threads.fetch_add(1, Ordering::Relaxed);
@@ -131,7 +133,7 @@ where
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
             // read without atomic operations as only this thread can set the value.
-            if (&entry.present as *const _ as *const bool).read() {
+            if entry.present.load(Ordering::Relaxed) {
                 Some((*entry.value.get()).assume_init_ref())
             } else {
                 None
@@ -168,7 +170,9 @@ where
                 continue;
             }
 
-            unsafe { Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, this_bucket_size)) };
+            let _ = unsafe {
+                Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, this_bucket_size))
+            };
         }
     }
 }
@@ -190,13 +194,9 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // we have to check all the buckets here because we reuse
-        // thread IDs. keeping track of the number of values and only
-        // yielding that many here wouldn't work, because a new thread
-        // could join and be inserted into a middle bucket, and we would
-        // yield that instead of an active thread that actually needs to
-        // participate in reference counting. yielding extra values is fine,
-        // but not yielding all originally active threads is not.
+        // because we reuse thread IDs, a new thread could join and be inserted into the middle of the list,
+        // so we have to check all the buckets here. yielding extra values is fine, but not yielding all originally
+        // active threads is not
         while self.bucket < BUCKETS {
             let bucket = unsafe {
                 self.thread_local
