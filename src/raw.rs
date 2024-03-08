@@ -117,6 +117,8 @@ impl Collector {
             //   to reservation.head and reservation.epoch for details
             // - acquire the birth epoch of the pointer. we need to record at least
             //   that epoch below to let other threads know we have access to this pointer
+            //   (TOOD: this requires pointers to be stored with release ordering, which is
+            //   not documented)
             let ptr = ptr.load(Ordering::SeqCst);
 
             // relaxed: we acquired at least the pointer's birth epoch above
@@ -386,10 +388,9 @@ impl Collector {
         // safety: the TAIL node stores the reference count
         let ref_count = unsafe { &(*batch.tail).batch.ref_count };
 
-        // relaxed: if we don't free the list, all accesses to the data are released by the
-        // seqcst fence above
+        // release: if we don't free the list, release the batch to the thread that will
         if ref_count
-            .fetch_add(active, Ordering::Relaxed)
+            .fetch_add(active, Ordering::Release)
             .wrapping_add(active)
             == 0
         {
@@ -429,7 +430,7 @@ impl Collector {
 
             // safety: TAIL nodes store the reference count of the batch
             unsafe {
-                // release: if we don't free the list, release any access of the data to the thread
+                // release: if we don't free the list, release any access of the batch to the thread
                 // that will
                 if (*tail).batch.ref_count.fetch_sub(1, Ordering::Release) == 1 {
                     // ensure any access of the data in the list happens-before we free the list
