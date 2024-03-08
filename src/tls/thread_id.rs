@@ -7,27 +7,19 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::usize;
-
-use once_cell::sync::Lazy;
 
 /// Thread ID manager which allocates thread IDs. It attempts to aggressively
 /// reuse thread IDs where possible to avoid cases where a ThreadLocal grows
 /// indefinitely when it is used by many short-lived threads.
+#[derive(Default)]
 struct ThreadIdManager {
     free_from: usize,
     free_list: BinaryHeap<Reverse<usize>>,
 }
 
 impl ThreadIdManager {
-    fn new() -> ThreadIdManager {
-        ThreadIdManager {
-            free_from: 0,
-            free_list: BinaryHeap::new(),
-        }
-    }
-
     fn alloc(&mut self) -> usize {
         if let Some(id) = self.free_list.pop() {
             id.0
@@ -46,8 +38,10 @@ impl ThreadIdManager {
     }
 }
 
-static THREAD_ID_MANAGER: Lazy<Mutex<ThreadIdManager>> =
-    Lazy::new(|| Mutex::new(ThreadIdManager::new()));
+fn thread_id_manager() -> &'static Mutex<ThreadIdManager> {
+    static THREAD_ID_MANAGER: OnceLock<Mutex<ThreadIdManager>> = OnceLock::new();
+    THREAD_ID_MANAGER.get_or_init(Default::default)
+}
 
 /// Data which is unique to the current thread while it is running.
 /// A thread ID may be reused after a thread exits.
@@ -79,12 +73,12 @@ struct ThreadHolder(Thread);
 
 impl ThreadHolder {
     fn new() -> ThreadHolder {
-        ThreadHolder(Thread::new(THREAD_ID_MANAGER.lock().unwrap().alloc()))
+        ThreadHolder(Thread::new(thread_id_manager().lock().unwrap().alloc()))
     }
 }
 impl Drop for ThreadHolder {
     fn drop(&mut self) {
-        THREAD_ID_MANAGER.lock().unwrap().free(self.0.id);
+        thread_id_manager().lock().unwrap().free(self.0.id);
     }
 }
 

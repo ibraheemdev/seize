@@ -23,9 +23,13 @@ impl Collector {
 
     /// Creates a new collector.
     pub fn new() -> Self {
+        let cpus = std::thread::available_parallelism()
+            .map(Into::into)
+            .unwrap_or(1);
+
         Self {
             raw: raw::Collector::with_threads(
-                num_cpus::get(),
+                cpus,
                 Self::DEFAULT_EPOCH_TICK,
                 Self::DEFAULT_RETIRE_TICK,
             ),
