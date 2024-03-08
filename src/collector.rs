@@ -62,7 +62,7 @@ impl Collector {
     /// before reclamation is attempted.
     ///
     /// Retired values are added to thread-local *batches*
-    /// before completing their actual retirement. After
+    /// before starting the reclamation process. After
     /// `batch_size` is hit, values are moved to separate
     /// *retirement lists*, where reference counting kicks
     /// in and batches are eventually reclaimed.
@@ -131,7 +131,6 @@ impl Collector {
 
         Guard {
             collector: self,
-            should_retire: UnsafeCell::new(false),
             _a: PhantomData,
         }
     }
@@ -168,12 +167,10 @@ impl Collector {
     pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
-        unsafe {
-            let (should_retire, batch) = self.raw.add(ptr, reclaim);
-            if should_retire {
-                self.raw.retire(batch);
-            }
-        }
+        // note that `add` doesn't actually reclaim the pointer immediately if the
+        // current thread is active, it instead adds it to it's reclamation list,
+        // but we don't guarantee that publicly.
+        unsafe { self.raw.add(ptr, reclaim) }
     }
 
     /// Returns true if both references point to the same collector.
@@ -225,7 +222,6 @@ impl fmt::Debug for Collector {
 /// See [`Collector::enter`] for details.
 pub struct Guard<'a> {
     collector: *const Collector,
-    should_retire: UnsafeCell<bool>,
     _a: PhantomData<&'a Collector>,
 }
 
@@ -248,7 +244,6 @@ impl Guard<'_> {
     pub const unsafe fn unprotected() -> Guard<'static> {
         Guard {
             collector: ptr::null(),
-            should_retire: UnsafeCell::new(false),
             _a: PhantomData,
         }
     }
@@ -281,10 +276,7 @@ impl Guard<'_> {
             return unsafe { (reclaim)(Link { node: ptr as _ }) };
         }
 
-        unsafe {
-            let (should_retire, _) = (*self.collector).raw.add(ptr, reclaim);
-            *self.should_retire.get() |= should_retire;
-        }
+        unsafe { (*self.collector).raw.add(ptr, reclaim) }
     }
 
     /// Get a reference to the collector this guard we created from.
@@ -321,6 +313,23 @@ impl Guard<'_> {
 
         unsafe { (*self.collector).raw.refresh() }
     }
+
+    /// Flush any retired values in the local batch.
+    ///
+    /// This method flushes any values from the current thread's local
+    /// batch, starting the reclamation process. Note that no memory
+    /// can be reclaimed while this guard is active, but calling `flush`
+    /// may allow memory to be reclaimed more quickly after the guard is
+    /// dropped.
+    ///
+    /// See [`Collector::batch_size`] for details about batching.
+    pub fn flush(&self) {
+        if self.collector.is_null() {
+            return;
+        }
+
+        unsafe { (*self.collector).raw.try_retire_batch() }
+    }
 }
 
 impl Drop for Guard<'_> {
@@ -329,13 +338,7 @@ impl Drop for Guard<'_> {
             return;
         }
 
-        unsafe {
-            (*self.collector).raw.leave();
-
-            if *self.should_retire.get() {
-                (*self.collector).raw.retire_batch();
-            }
-        }
+        unsafe { (*self.collector).raw.leave() }
     }
 }
 
