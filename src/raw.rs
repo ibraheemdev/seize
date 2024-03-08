@@ -189,6 +189,10 @@ impl Collector {
     // Add a node to the retirement batch.
     //
     // Returns `true` if the batch size has been reached and the batch should be retired.
+    //
+    // # Safety
+    //
+    // `ptr` is a valid pointer.
     pub unsafe fn add<T>(
         &self,
         ptr: *mut Linked<T>,
@@ -197,10 +201,9 @@ impl Collector {
         // safety: batches are only accessed by the current thread
         let batch = unsafe { &mut *self.batches.get_or(Default::default).get() };
 
-        let node = UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node));
-
         // safety: `ptr` is guaranteed to be a valid pointer
-        //
+        let node = unsafe { UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node)) };
+
         // any other thread with a reference to the pointer only has a shared
         // reference to the UnsafeCell<Node>, which is allowed to alias. the caller
         // guarantees that the same pointer is not retired twice, so we can safely write

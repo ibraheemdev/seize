@@ -32,20 +32,18 @@ jobs:
           command: test
 
   miri:
-    name: Miri
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - run: |
           echo "NIGHTLY=nightly-$(curl -s https://rust-lang.github.io/rustup-components-history/x86_64-unknown-linux-gnu/miri)" >> $GITHUB_ENV
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - name: Install ${{ env.NIGHTLY }}
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.NIGHTLY }}
-          override: true
-      - run: rustup component add miri
-      - uses: actions-rs/cargo@v1
-      - run: cargo miri test
+          components: miri
+      - name: cargo miri test
+        run: cargo miri test
         env:
           MIRIFLAGS: "-Zmiri-tag-raw-pointers -Zmiri-disable-isolation"
           
