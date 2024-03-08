@@ -1,4 +1,3 @@
-use crate::cfg::trace;
 use crate::tls::ThreadLocal;
 use crate::utils::CachePadded;
 use crate::{Link, Linked};
@@ -52,9 +51,7 @@ impl Collector {
         let birth_epoch = match self.epoch_frequency {
             // advance the global epoch
             Some(ref freq) if *count % freq.get() == 0 => {
-                let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
-                trace!("advancing global epoch to {}", epoch + 1);
-                epoch + 1
+                self.epoch.fetch_add(1, Ordering::Relaxed) + 1
             }
             Some(_) => self.epoch.load(Ordering::Relaxed),
             // we aren't tracking epochs
@@ -73,8 +70,6 @@ impl Collector {
 
     // Mark the current thread as active.
     pub fn enter(&self) {
-        trace!("marking thread as active");
-
         let reservation = self.reservations.get_or(Default::default);
 
         // calls to `enter` may be reentrant, so we need to keep track of the number
@@ -144,8 +139,6 @@ impl Collector {
 
     // Mark the current thread as inactive.
     pub fn leave(&self) {
-        trace!("marking thread as inactive");
-
         let reservation = self.reservations.get_or(Default::default);
 
         // decrement the active guard count
@@ -168,8 +161,6 @@ impl Collector {
 
     // Decrement any reference counts, keeping the thread marked as active.
     pub unsafe fn flush(&self) {
-        trace!("flushing guard");
-
         let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
 
@@ -260,8 +251,6 @@ impl Collector {
     //
     // The batch must contain at least one node
     pub unsafe fn retire(&self, batch: &mut Batch) {
-        trace!("attempting to retire batch");
-
         // establish a total order between the retirement of nodes in this batch and stores
         // marking a thread as active (or active in an epoch):
         // - if the store comes first, we will see that the thread is active
@@ -413,8 +402,6 @@ impl Collector {
     //
     // `list` must be a valid reservation list
     unsafe fn traverse(mut list: *mut Node) {
-        trace!("decrementing batch reference counts");
-
         loop {
             let curr = list;
 
@@ -450,8 +437,6 @@ impl Collector {
     // - `list` must be the last reference to the TAIL node of the batch.
     // - The reference count must be zero
     unsafe fn free_list(list: *mut Node) {
-        trace!("freeing reservation list");
-
         // safety: `list` is a valid pointer
         let mut list = unsafe { (*list).batch_link };
 
@@ -475,8 +460,6 @@ impl Collector {
 
 impl Drop for Collector {
     fn drop(&mut self) {
-        trace!("dropping collector");
-
         for batch in self.batches.iter() {
             // safety: We have &mut self
             let batch = unsafe { &mut *batch.get() };
