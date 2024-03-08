@@ -39,7 +39,7 @@ impl Collector {
         }
     }
 
-    // Create a new node
+    // Create a new node.
     pub fn node(&self) -> Node {
         // safety: node counts are only accessed by the current thread
         let count = unsafe { &mut *self.node_count.get_or(Default::default).get() };
@@ -47,9 +47,8 @@ impl Collector {
 
         // record the current epoch value
         //
-        // note that it's fine if we see older epoch values here,
-        // which just means more threads will be counted as active
-        // than might actually be
+        // note that it's fine if we see older epoch values here, which just means more
+        // threads will be counted as active than might actually be
         let birth_epoch = match self.epoch_frequency {
             // advance the global epoch
             Some(ref freq) if *count % freq.get() == 0 => {
@@ -72,14 +71,14 @@ impl Collector {
         }
     }
 
-    // Mark the current thread as active
+    // Mark the current thread as active.
     pub fn enter(&self) {
         trace!("marking thread as active");
 
         let reservation = self.reservations.get_or(Default::default);
 
-        // calls to `enter` may be reentrant, so we need to keep track of
-        // the number of active guards for the current thread
+        // calls to `enter` may be reentrant, so we need to keep track of the number
+        // of active guards for the current thread
         let guards = reservation.guards.get();
         reservation.guards.set(guards + 1);
 
@@ -96,9 +95,9 @@ impl Collector {
         }
     }
 
-    // Load an atomic pointer
+    // Load an atomic pointer.
     #[inline]
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, _ordering: Ordering) -> *mut T {
         if self.epoch_frequency.is_none() {
             // epoch tracking is disabled, but pointer loads still need to be seqcst to participate
             // in the total order. see `enter` for details
@@ -141,7 +140,7 @@ impl Collector {
         }
     }
 
-    // Mark the current thread as inactive
+    // Mark the current thread as inactive.
     pub fn leave(&self) {
         trace!("marking thread as inactive");
 
@@ -151,8 +150,8 @@ impl Collector {
         let guards = reservation.guards.get();
         reservation.guards.set(guards - 1);
 
-        // we can only decrement reference counts after all guards for
-        // the current thread are dropped
+        // we can only decrement reference counts after all guards for the current thread
+        // are dropped
         if guards == 1 {
             // release: exit the critical section
             // acquire: acquire any new reservation nodes
@@ -165,18 +164,19 @@ impl Collector {
         }
     }
 
-    // Decrement any reference counts, keeping the thread marked as active
+    // Decrement any reference counts, keeping the thread marked as active.
     pub unsafe fn flush(&self) {
         trace!("flushing guard");
 
         let reservation = self.reservations.get_or(Default::default);
         let guards = reservation.guards.get();
 
-        // we can only decrement reference counts after all guards for
-        // the current thread are dropped
+        // we can only decrement reference counts after all guards for the current
+        // thread are dropped
         if guards == 1 {
             // release: exit the critical section
-            // acquire: acquire any new reservation nodes
+            // acquire: acquire any new reservation nodes and the values of any pointers
+            // that were retired
             let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
 
             if head != Node::INACTIVE {
@@ -257,11 +257,11 @@ impl Collector {
     pub unsafe fn retire(&self, batch: &mut Batch) {
         trace!("attempting to retire batch");
 
-        // establish a total order between the retirement of nodes in this batch, and stores
-        // marking a thread as active:
-        // - if this fence comes first, we will see that the thread is active
-        // - if the store comes first, the thread will see the new values of any pointers
-        //   in this batch
+        // establish a total order between the retirement of nodes in this batch and stores
+        // marking a thread as active (or active in an epoch):
+        // - if the store comes first, we will see that the thread is active
+        // - if this fence comes first, the thread will see the new values of any pointers
+        //   in this batch.
         //
         // this fence also establishes synchronizes with the fence run when a thread is created:
         // - if our fence comes first, they will see the new values of any pointers in this batch
@@ -292,18 +292,22 @@ impl Collector {
         for reservation in self.reservations.iter() {
             // if this thread is inactive, we can skip it
             //
-            // acquire: if the thread is inactive, synchronize with `leave`
-            // to ensure any accesses happen-before we retire
-            if reservation.head.load(Ordering::Acquire) == Node::INACTIVE {
+            // relaxed: if the thread is active, we have nothing to synchronize with
+            // as this batch will be added to it's reservation list
+            if reservation.head.load(Ordering::Relaxed) == Node::INACTIVE {
                 continue;
             }
 
-            // if this thread's epoch is behind the earliest birth epoch
-            // in this batch we can skip it, as there is no way it could
-            // have accessed any of the pointers in this batch
+            // if this thread's epoch is behind the earliest birth epoch in this batch
+            // we can skip it, as there is no way it could have accessed any of the pointers
+            // in this batch
+            //
+            // relaxed: if the epoch is behind there is nothing to synchronize with, and
+            // we already ensured we will see it's relevant epoch with the seqcst fence
+            // above.
             //
             // if epoch tracking is disabled this is always false (0 < 0)
-            if reservation.epoch.load(Ordering::Acquire) < min_epoch {
+            if reservation.epoch.load(Ordering::Relaxed) < min_epoch {
                 continue;
             }
 
@@ -315,17 +319,18 @@ impl Collector {
 
             // temporarily store this thread's list in a node in our batch
             //
-            // safety: we checked that this is not the last node in the batch
-            // list above, and all nodes in a batch are valid
+            // safety: we checked that this is not the last node in the batch list above,
+            // and all nodes in a batch are valid
             unsafe {
                 (*last).reservation.head = &reservation.head;
                 last = (*last).batch.next;
             }
         }
 
-        // acquire: for any inactive threads that we skipped above, synchronize with
-        // the release store of INACTIVE in `leave`, or of the new epoch `protect`, to
-        // ensure that any accesses of old pointer values happen-before we retire
+        // for any inactive threads we skipped above, synchronize with `leave` to ensure
+        // any accesses happen-before we retire. we ensured with the seqcst fence above
+        // that the next time the thread becomes active it will see the new values of any
+        // pointers in this batch.
         atomic::fence(Ordering::Acquire);
 
         // add the batch to all active thread's reservation lists
@@ -333,24 +338,23 @@ impl Collector {
         let mut curr = batch.head;
 
         while curr != last {
-            // safety: all nodes in the batch are valid, and we just initialized
-            // `reservation.head` for all nodes until `last` in the loop above
+            // safety: all nodes in the batch are valid, and we just initialized `reservation.head`
+            // for all nodes until `last` in the loop above
             let head = unsafe { &*(*curr).reservation.head };
 
             // acquire:
-            // - if the thread is inactive, synchronize with `leave` to ensure any
-            //   accesses happen-before we retire
-            // - if the thread is active, acquire any reservation nodes added by
-            //   a concurrent call to `retire`
+            // - if the thread became inactive, synchronize with `leave` to ensure any accesses
+            //   happen-before we retire
+            // - if the thread is active, acquire any reservation nodes added by a concurrent call
+            //   to `retire`
             let mut prev = head.load(Ordering::Acquire);
 
             loop {
                 // the thread became inactive, skip it
                 //
-                // as long as the thread became inactive at some point after
-                // we verified it was active, it can no longer access any pointers
-                // in this batch. the next time it becomes active it will load
-                // the new pointer values due to the seqcst fence above.
+                // as long as the thread became inactive at some point after we verified it was
+                // active, it can no longer access any pointers in this batch. the next time it
+                // becomes active it will load the new pointer values due to the seqcst fence above
                 if prev == Node::INACTIVE {
                     break;
                 }
@@ -368,7 +372,6 @@ impl Collector {
                     Err(found) => {
                         // acquire the new reservation loads
                         atomic::fence(Ordering::Acquire);
-
                         prev = found;
                         continue;
                     }
@@ -381,19 +384,18 @@ impl Collector {
         // safety: the TAIL node stores the reference count
         let ref_count = unsafe { &(*batch.tail).batch.ref_count };
 
-        // release: if we don't free the list, release any modifications
-        // of the data to the thread that will
+        // relaxed: if we don't free the list, all accesses to the data are released by the
+        // seqcst fence above
         if ref_count
             .fetch_add(active, Ordering::Release)
             .wrapping_add(active)
             == 0
         {
-            // we are freeing the list, acquire any modifications of the data
-            // released by the threads that decremented the count
+            // ensure any access of the data in the list happens-before we free the list
             atomic::fence(Ordering::Acquire);
 
-            // safety: The reference count is 0, meaning that either no threads
-            // were active, or they have all already decremented the count
+            // safety: The reference count is 0, meaning that either no threads were active,
+            // or they have all already decremented the count
             unsafe { Collector::free_list(batch.tail) }
         }
 
@@ -402,8 +404,7 @@ impl Collector {
         batch.size = 0;
     }
 
-    // Traverse the reservation list, decrementing the
-    // refernce count of each batch
+    // Traverse the reservation list, decrementing the refernce count of each batch
     //
     // # Safety
     //
@@ -425,19 +426,11 @@ impl Collector {
             let tail = unsafe { (*curr).batch_link };
 
             // safety: TAIL nodes store the reference count of the batch
-            //
-            // acquire: if we free the list, acquire any
-            // modifications to the data released by the threads
-            // that decremented the count
-            //
-            // release: if we don't free the list, release any
-            // modifications to the data to the thread that will
             unsafe {
-                // release: if we don't free the list, release any modifications of
-                // the data to the thread that will
+                // release: if we don't free the list, release any access of the data to the thread
+                // that will
                 if (*tail).batch.ref_count.fetch_sub(1, Ordering::Release) == 1 {
-                    // we are freeing the list, acquire any modifications of the data
-                    // released by the threads that decremented the count
+                    // ensure any access of the data in the list happens-before we free the list
                     atomic::fence(Ordering::Acquire);
 
                     // safety: we have the last reference to the batch
@@ -447,13 +440,12 @@ impl Collector {
         }
     }
 
-    // Free a reservation list
+    // Free a reservation list.
     //
     // # Safety
     //
-    // `list` must be the last reference to the TAIL node of the batch.
-    //
-    // The reference count must be zero
+    // - `list` must be the last reference to the TAIL node of the batch.
+    // - The reference count must be zero
     unsafe fn free_list(list: *mut Node) {
         trace!("freeing reservation list");
 
@@ -546,8 +538,8 @@ union BatchNode {
 impl Node {
     // Represents an inactive thread
     //
-    // While null indicates an empty list, INACTIVE indicates the thread has
-    // no active guards and is not accessing any nodes.
+    // While null indicates an empty list, INACTIVE indicates the thread has no active
+    // guards and is not accessing any nodes.
     pub const INACTIVE: *mut Node = -1_isize as usize as _;
 }
 
