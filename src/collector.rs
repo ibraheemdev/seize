@@ -146,7 +146,24 @@ impl Collector {
         }
     }
 
-    /// Links a value to the collector and allocates it.
+    /// Creates a new `Linked` object with the given value.
+    ///
+    /// This is equivalent to:
+    ///
+    /// ```ignore
+    /// Linked {
+    ///     value,
+    ///     link: collector.link()
+    /// }
+    /// ```
+    pub fn link_value<T>(&self, value: T) -> Linked<T> {
+        Linked {
+            link: self.link(),
+            value,
+        }
+    }
+
+    /// Links a value to the collector and allocates it with `Box.
     ///
     /// This is equivalent to:
     ///
