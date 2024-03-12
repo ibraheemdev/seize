@@ -135,7 +135,8 @@ mod seize_stack {
                 {
                     unsafe {
                         let data = ptr::read(&(*head).data);
-                        self.collector.retire(head, reclaim::boxed::<Node<T>>);
+                        self.collector
+                            .retire(head, reclaim::boxed::<Linked<Node<T>>>);
                         return Some(ManuallyDrop::into_inner(data));
                     }
                 }

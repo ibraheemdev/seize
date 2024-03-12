@@ -8,4 +8,4 @@ mod utils;
 
 pub mod reclaim;
 
-pub use collector::{AtomicPtr, Collector, Guard, Link, Linked};
+pub use collector::{Collector, Guard, Link, Linked, AsLink};

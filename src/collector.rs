@@ -3,7 +3,7 @@ use crate::raw;
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{fmt, ptr};
 
 /// Fast, efficient, and robust memory reclamation.
@@ -93,15 +93,16 @@ impl Collector {
     /// # Examples
     ///
     /// ```rust
-    /// # use seize::AtomicPtr;
-    /// # use std::sync::atomic::Ordering;
+    /// # use std::sync::atomic::{AtomicPtr, Ordering};
     /// # let collector = seize::Collector::new();
+    /// use seize::{reclaim, Linked};
+    ///
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard.defer_retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { guard.defer_retire(value, reclaim::boxed::<Linked<usize>>) };
     /// ```
     ///
     /// Note that `enter` is reentrant, and it is legal to create
@@ -109,9 +110,10 @@ impl Collector {
     /// marked as active until the last guard is dropped:
     ///
     /// ```rust
-    /// # use seize::AtomicPtr;
-    /// # use std::sync::atomic::Ordering;
+    /// # use std::sync::atomic::{AtomicPtr, Ordering};
     /// # let collector = seize::Collector::new();
+    /// use seize::{reclaim, Linked};
+    ///
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
     /// let guard1 = collector.enter();
@@ -123,7 +125,7 @@ impl Collector {
     /// // is still safe to access as a guard still
     /// // exists
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard2.defer_retire(value, seize::reclaim::boxed::<usize>) };
+    /// # unsafe { guard2.defer_retire(value, reclaim::boxed::<Linked<usize>>) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     pub fn enter(&self) -> Guard<'_> {
@@ -138,9 +140,8 @@ impl Collector {
     /// Link a value to the collector.
     ///
     /// See [the guide](crate#allocating-objects) for details.
-    pub fn link<T>(&self, value: T) -> Linked<T> {
-        Linked {
-            value,
+    pub fn link(&self) -> Link {
+        Link {
             node: UnsafeCell::new(self.raw.node()),
         }
     }
@@ -150,10 +151,16 @@ impl Collector {
     /// This is equivalent to:
     ///
     /// ```ignore
-    /// Box::into_raw(Box::new(collector.link(value)))
+    /// Box::into_raw(Box::new(Linked {
+    ///     value,
+    ///     link: collector.link()
+    /// }))
     /// ```
     pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
-        Box::into_raw(Box::new(self.link(value)))
+        Box::into_raw(Box::new(Linked {
+            link: self.link(),
+            value,
+        }))
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
@@ -163,8 +170,16 @@ impl Collector {
     /// the pointer may still be accessed by the current thread.
     ///
     /// See [the guide](crate#retiring-objects) for details.
+    ///
+    /// # Safety
+    ///
+    /// The retired object must no longer be accessible to any thread that enters
+    /// after it is removed. It also cannot be accessed by the current thread
+    /// after `retire` is called.
+    ///
+    /// Additionally, he reclaimer passed to `retire` must correctly deallocate values of type `T`.
     #[allow(clippy::missing_safety_doc)] // in guide
-    pub unsafe fn retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         // note that `add` doesn't actually reclaim the pointer immediately if the
@@ -229,7 +244,7 @@ impl Guard<'_> {
     /// Returns a dummy guard.
     ///
     /// Calling [`protect`](Guard::protect) on an unprotected guard will
-    /// load the pointer directly, and [`retire`](Guard::retire) will
+    /// load the pointer directly, and [`retire`](Guard::defer_retire) will
     /// reclaim objects immediately.
     ///
     /// Unprotected guards are useful when calling guarded functions
@@ -252,7 +267,7 @@ impl Guard<'_> {
     ///
     /// See [the guide](crate#protecting-pointers) for details.
     #[inline]
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut Linked<T> {
+    pub fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
         if self.collector.is_null() {
             // unprotected guard
             return ptr.load(ordering);
@@ -268,12 +283,12 @@ impl Guard<'_> {
     ///
     /// See [the guide](crate#retiring-objects) for details.
     #[allow(clippy::missing_safety_doc)] // in guide
-    pub unsafe fn defer_retire<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         if self.collector.is_null() {
             // unprotected guard
-            return unsafe { (reclaim)(Link { node: ptr as _ }) };
+            return unsafe { (reclaim)(ptr.cast::<Link>()) };
         }
 
         unsafe { (*self.collector).raw.add(ptr, reclaim) }
@@ -348,23 +363,64 @@ impl fmt::Debug for Guard<'_> {
     }
 }
 
-/// The link part of a [`Linked<T>`].
+/// A link to the collector.
 ///
-/// See [the guide](crate#3-reclaimers) for details.
+/// See [the guide](crate#custom-reclaimers) for details.
+#[repr(transparent)]
 pub struct Link {
-    pub(crate) node: *mut raw::Node,
+    #[allow(dead_code)]
+    pub(crate) node: UnsafeCell<raw::Node>,
 }
 
 impl Link {
-    /// Extract the underlying value from this link.
+    /// Cast this `link` to it's underlying type.
     ///
-    /// # Safety
-    ///
-    /// Casting to the incorrect type is **undefined behavior**.
-    pub unsafe fn cast<T>(&mut self) -> *mut Linked<T> {
-        self.node as *mut _
+    /// Note that while this function is safe, using the returned
+    /// pointer is only sound if the link is in fact a type-erased `T`.
+    /// This means that when casting a link in a reclaimer, the value
+    /// that was retired must be of type `T`.
+    pub fn cast<T: AsLink>(link: *mut Link) -> *mut T {
+        link.cast()
     }
 }
+
+/// A type that can be pointer-cast to and from a [`Link`].
+///
+/// Most reclamation use cases can avoid this trait and work instead
+/// with the [`Linked`] wrapper type. However, if you want more control
+/// over the layout of your type (i.e. are working with a DST),
+/// you may need to implement this trait directly.
+///
+/// # Safety
+///
+/// Types implementing this trait must be marked `#[repr(C)]`
+/// and have a [`Link`] as their **first** field.
+///
+/// # Examples
+///
+/// ```rust
+/// use seize::{AsLink, Collector, Link};
+///
+/// #[repr(C)]
+/// struct Bytes {
+///     // safety invariant: Link must be the first field
+///     link: Link,
+///     values: [*mut u8; 0],
+/// }
+///
+/// // Safety: Bytes is repr(C) and has Link as it's first field
+/// unsafe impl AsLink for Bytes {}
+///
+/// // Deallocate an `Bytes`.
+/// unsafe fn dealloc(ptr: *mut Bytes, collector: &Collector) {
+///     collector.retire(ptr, |link| {
+///         // safety `ptr` is of type *mut Bytes
+///         let link: *mut Bytes = Link::cast(link);
+///         // ..
+///     });
+/// }
+/// ```
+pub unsafe trait AsLink {}
 
 /// A value [linked](Collector::link) to a collector.
 ///
@@ -376,15 +432,11 @@ impl Link {
 /// See [the guide](crate#allocating-objects) for details.
 #[repr(C)]
 pub struct Linked<T> {
-    pub(crate) node: UnsafeCell<raw::Node>, // Safety Invariant: this field must come first
-    value: T,
+    pub link: Link, // Safety Invariant: this field must come first
+    pub value: T,
 }
 
-impl<T> Linked<T> {
-    pub fn into_inner(linked: Linked<T>) -> T {
-        linked.value
-    }
-}
+unsafe impl<T> AsLink for Linked<T> {}
 
 impl<T: PartialEq> PartialEq for Linked<T> {
     fn eq(&self, other: &Self) -> bool {
@@ -419,8 +471,3 @@ impl<T> std::ops::DerefMut for Linked<T> {
         &mut self.value
     }
 }
-
-/// A linked atomic pointer.
-///
-/// This is simply a type alias for `std::AtomicPtr<Linked<T>>`.
-pub type AtomicPtr<T> = std::sync::atomic::AtomicPtr<Linked<T>>;

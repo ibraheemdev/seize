@@ -1,6 +1,6 @@
 use crate::tls::ThreadLocal;
 use crate::utils::CachePadded;
-use crate::{Link, Linked};
+use crate::{AsLink, Link};
 
 use std::cell::{Cell, UnsafeCell};
 use std::mem::{self, ManuallyDrop};
@@ -184,12 +184,15 @@ impl Collector {
     // # Safety
     //
     // `ptr` is a valid pointer.
-    pub unsafe fn add<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
+    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link))
+    where
+        T: AsLink,
+    {
         // safety: batches are only accessed by the current thread
         let batch = unsafe { &mut *self.batches.load().get() };
 
-        // safety: `ptr` is guaranteed to be a valid pointer
-        let node = unsafe { UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node)) };
+        // safety: `ptr` is guaranteed to be a valid pointer that can be cast to a node
+        let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
 
         // any other thread with a reference to the pointer only has a shared
         // reference to the UnsafeCell<Node>, which is allowed to alias. the caller
@@ -443,7 +446,7 @@ impl Collector {
 
             unsafe {
                 list = (*node).batch.next;
-                ((*node).reclaim)(Link { node });
+                ((*node).reclaim)(node.cast::<Link>());
             }
 
             // if `node` is the TAIL node, then `node.batch.next` will interpret the
@@ -493,7 +496,7 @@ pub struct Node {
     // SLOT: pointer to TAIL
     batch_link: *mut Node,
     // User provided drop glue
-    reclaim: unsafe fn(Link),
+    reclaim: unsafe fn(*mut Link),
     // unions for different phases of a node's lifetime
     batch: BatchNode,
     reservation: ReservationNode,

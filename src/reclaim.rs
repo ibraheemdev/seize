@@ -1,12 +1,12 @@
 //! Common memory reclaimers.
 //!
 //! Functions in this module can be passed to [`retire`](crate::Collector::retire)
-//! to free allocated memory or run drop glue. See [the guide](crate#3-reclaimers)
+//! to free allocated memory or run drop glue. See [the guide](crate#custom-reclaimers)
 //! for details about memory reclamation, and writing custom reclaimers.
 
 use std::ptr;
 
-use crate::Link;
+use crate::{AsLink, Link};
 
 /// Reclaims memory allocated with [`Box`].
 ///
@@ -15,12 +15,12 @@ use crate::Link;
 /// # Safety
 ///
 /// Ensure that the correct type annotations are used when
-/// passing this function to [`retire`](crate::Collector::retire):
-/// the link passed must have been created from a **valid**
-/// `Linked<T>`.
-pub unsafe fn boxed<T>(mut link: Link) {
+/// passing this function to [`retire`](crate::Collector::retire).
+/// The value retired must have been of type `T` to be retired through
+/// `boxed::<T>`.
+pub unsafe fn boxed<T: AsLink>(link: *mut Link) {
     unsafe {
-        let _ = Box::from_raw(link.cast::<T>());
+        let _: Box<T> = Box::from_raw(Link::cast(link));
     }
 }
 
@@ -31,11 +31,11 @@ pub unsafe fn boxed<T>(mut link: Link) {
 /// # Safety
 ///
 /// Ensure that the correct type annotations are used when
-/// passing this function to [`retire`](crate::Collector::retire):
-/// the link passed must have been created from a **valid**
-/// `Linked<T>`.
-pub unsafe fn in_place<T>(mut link: Link) {
+/// passing this function to [`retire`](crate::Collector::retire).
+/// The value retired must have been of type `T` to be retired through
+/// `in_place::<T>`.
+pub unsafe fn in_place<T: AsLink>(link: *mut Link) {
     unsafe {
-        ptr::drop_in_place(link.cast::<T>());
+        ptr::drop_in_place::<T>(Link::cast(link));
     }
 }
