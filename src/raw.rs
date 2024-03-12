@@ -41,7 +41,7 @@ impl Collector {
     // Create a new node.
     pub fn node(&self) -> Node {
         // safety: node counts are only accessed by the current thread
-        let count = unsafe { &mut *self.node_count.get_or(Default::default).get() };
+        let count = unsafe { &mut *self.node_count.load().get() };
         *count += 1;
 
         // record the current epoch value
@@ -70,7 +70,7 @@ impl Collector {
 
     // Mark the current thread as active.
     pub fn enter(&self) {
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load();
 
         // calls to `enter` may be reentrant, so we need to keep track of the number
         // of active guards for the current thread
@@ -99,7 +99,7 @@ impl Collector {
             return ptr.load(Ordering::SeqCst);
         }
 
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load();
 
         // load the last epoch we recorded
         //
@@ -139,7 +139,7 @@ impl Collector {
 
     // Mark the current thread as inactive.
     pub fn leave(&self) {
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load();
 
         // decrement the active guard count
         let guards = reservation.guards.get();
@@ -161,7 +161,7 @@ impl Collector {
 
     // Decrement any reference counts, keeping the thread marked as active.
     pub unsafe fn refresh(&self) {
-        let reservation = self.reservations.get_or(Default::default);
+        let reservation = self.reservations.load();
         let guards = reservation.guards.get();
 
         // we can only decrement reference counts after all guards for the current
@@ -186,7 +186,7 @@ impl Collector {
     // `ptr` is a valid pointer.
     pub unsafe fn add<T>(&self, ptr: *mut Linked<T>, reclaim: unsafe fn(Link)) {
         // safety: batches are only accessed by the current thread
-        let batch = unsafe { &mut *self.batches.get_or(Default::default).get() };
+        let batch = unsafe { &mut *self.batches.load().get() };
 
         // safety: `ptr` is guaranteed to be a valid pointer
         let node = unsafe { UnsafeCell::raw_get(ptr::addr_of_mut!((*ptr).node)) };
@@ -235,7 +235,7 @@ impl Collector {
     // Attempt to retire nodes in the current thread's batch.
     pub fn try_retire_batch(&self) {
         // safety: batches are only accessed by the current thread
-        unsafe { self.try_retire(&mut *self.batches.get_or(Default::default).get()) }
+        unsafe { self.try_retire(&mut *self.batches.load().get()) }
     }
 
     // Attempt to retire nodes in this batch.
@@ -268,7 +268,7 @@ impl Collector {
 
         // safety: TAIL nodes always have `min_epoch` initialized
         let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
-        let current_reservation = self.reservations.get_or(Default::default);
+        let current_reservation = self.reservations.load();
 
         let mut last = batch.head;
 
