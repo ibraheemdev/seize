@@ -48,7 +48,7 @@ criterion_main!(benches);
 
 mod seize_stack {
     use criterion::black_box;
-    use seize::{Collector, Linked};
+    use seize::{Collector, Link, Linked};
     use std::ptr;
 
     pub struct Stack {
@@ -94,8 +94,8 @@ mod seize_stack {
 
                 self.head = (*head).next;
 
-                guard.defer_retire(head, |mut link| {
-                    let head = link.cast::<Node>();
+                guard.defer_retire(head, |link| {
+                    let head: *mut Linked<Node> = Link::cast(link);
                     assert!(!head.is_null());
                     assert!((*head).data == Some(1));
                 });

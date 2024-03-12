@@ -1,8 +1,8 @@
-use seize::{reclaim, AtomicPtr, Collector, Guard, Linked};
+use seize::{reclaim, Collector, Guard, Linked};
 
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -24,7 +24,7 @@ mod cfg {
 fn stress() {
     #[derive(Debug)]
     pub struct TreiberStack<T> {
-        head: AtomicPtr<Node<T>>,
+        head: AtomicPtr<Linked<Node<T>>>,
         collector: Collector,
     }
 
@@ -83,7 +83,8 @@ fn stress() {
                 {
                     unsafe {
                         let data = ptr::read(&(*head).data);
-                        self.collector.retire(head, reclaim::boxed::<Node<T>>);
+                        self.collector
+                            .retire(head, reclaim::boxed::<Linked<Node<T>>>);
                         return Some(ManuallyDrop::into_inner(data));
                     }
                 }
@@ -156,7 +157,7 @@ fn single_thread() {
         {
             let guard = collector.enter();
             let value = guard.protect(&zero, Ordering::Acquire);
-            unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+            unsafe { collector.retire(value, reclaim::boxed::<Linked<Foo>>) }
         }
     }
 
@@ -201,13 +202,13 @@ fn two_threads() {
         let zero = AtomicPtr::new(collector.link_boxed(Foo(zero_dropped.clone())));
         let guard = collector.enter();
         let value = guard.protect(&zero, Ordering::Acquire);
-        unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+        unsafe { collector.retire(value, reclaim::boxed::<Linked<Foo>>) }
     }
 
     rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
     let value = guard.protect(&one, Ordering::Acquire);
-    unsafe { collector.retire(value, reclaim::boxed::<Foo>) }
+    unsafe { collector.retire(value, reclaim::boxed::<Linked<Foo>>) }
 
     rx.recv().unwrap(); // wait for thread to drop guard
     h.join().unwrap();
@@ -256,7 +257,7 @@ fn refresh() {
     for i in 0..cfg::ITER {
         for n in nums.iter() {
             let old = n.swap(collector.link_boxed(i), Ordering::AcqRel);
-            unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+            unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
         }
     }
 
@@ -267,7 +268,7 @@ fn refresh() {
     // cleanup
     for n in nums.iter() {
         let old = n.swap(ptr::null_mut(), Ordering::Acquire);
-        unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+        unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
     }
 }
 
@@ -291,7 +292,7 @@ fn delayed_retire() {
     let guard = collector.enter();
 
     for object in objects {
-        unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+        unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
     }
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -333,7 +334,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
             }
         }
     })
@@ -368,7 +369,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
             }
         }
     })

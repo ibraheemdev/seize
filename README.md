@@ -76,10 +76,11 @@ impl<T> Stack<T> {
 Seize requires storing some metadata about the global epoch for each object that
 is allocated. It also needs to reserve a couple words for retirement lists.
 Because of this, objects in a concurrent data structure that may be reclaimed must
-take the form of `seize::Linked<T>`, as opposed to just `T`.
+embed the `Link` type or use the `Linked<T>` wrapper provided for convenience. See
+[DST Support](#dst-support) for more details.
 
-You can link a value to a collector with the `link` method. `link_boxed` is also
-provided as a quick way to link an object to a collector, and allocate it with `Box`:
+You can create a `Link` with the `link` method, or allocate and link a value with
+the `link_boxed` helper:
 
 ```rust
 use seize::{reclaim, Collector, Linked};
@@ -191,7 +192,7 @@ impl<T> Stack<T> {
             {
                 unsafe {
                     let data = ptr::read(&(*head).value);
-                    self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+                    self.collector.retire(head, reclaim::boxed::<Linked<Node<T>>>); // <===
                     return Some(ManuallyDrop::into_inner(data));
                 }
             }
@@ -202,14 +203,14 @@ impl<T> Stack<T> {
 
 There are a couple important things to note about retiring an object:
 
-#### 1. Retired objects must be logically removed
+#### Retired objects must be logically removed
 
 An object can only be retired if it is _no longer accessible_ to any thread that
 comes after. In the above code example this was ensured by swapping out the node
 before retiring it. Threads that loaded a value _before_ it was retired are
 safe, but threads that come after are not.
 
-#### 2. Retired objects cannot be accessed by the current thread
+#### Retired objects cannot be accessed by the current thread
 
 Unlike in schemes like EBR, a guard does not protect objects retired by the
 current thread. If no other thread holds a reference to an object it may be
@@ -231,13 +232,13 @@ println!("{}", (*ptr).value); // <===== ok!
 drop(guard); // <===== ptr is invalidated
 ```
 
-#### 3. Custom Reclaimers
+#### Custom Reclaimers
 
 You probably noticed that `retire` takes a function as a second parameter. This
 function is known as a _reclaimer_, and is run when the collector decides it is
 safe to free the retired object. Typically you will pass in a function from the
-`seize::reclaim` module. For example, values allocated with `Box` can use
-`reclaim::boxed`:
+[`seize::reclaim`](https://docs.rs/seize/latest/seize/reclaim/index.html) module.
+For example, values allocated with `Box` can use `reclaim::boxed`:
 
 ```rust,ignore
 use seize::reclaim;
@@ -245,7 +246,7 @@ use seize::reclaim;
 impl<T> Stack<T> {
     pub fn pop(&self) -> Option<T> {
         // ...
-        self.collector.retire(head, reclaim::boxed::<Node<T>>); // <===
+        self.collector.retire(head, reclaim::boxed::<Linked<Node<T>>); // <===
         // ...
     }
 }
@@ -255,25 +256,30 @@ The type annotation there is important. It is **unsound** to pass a reclaimer of
 a different type than the object being retired.
 
 If you need to run custom reclamation code, you can write a custom reclaimer.
-Functions passed to `retire` are called with a type-erased `Link`. This is
+Functions passed to `retire` are called with a type-erased `Link` pointer. This is
 because retired values are connected to thread-local batches via linked lists,
 losing any type information. To extract the underlying value from a link, you can
-call the `cast` method.
+call the `cast` method:
 
 ```rust,ignore
-collector.retire(value, |link: Link| unsafe {
-    // SAFETY: the value passed to retire was of type
-    // `*mut Linked<Value>`
-    let ptr: *mut Linked<Value> = link.cast::<Value>();
+collector.retire(value, |link: *mut Link| unsafe {
+    // SAFETY: the value retired was of type *mut Linked<T>
+    let ptr: *mut Linked<T> = Link::cast(link);
 
     // SAFETY: the value was allocated with `link_boxed`
     let value = Box::from_raw(ptr);
-
     println!("dropping {}", value);
-
     drop(value);
 });
 ```
+
+### DST Support
+
+Most reclamation use cases can work with `Linked<T>` and avoid working with
+links directly. However, advanced use cases such as dynamically sized types
+may requie more control over type layout. To support this, seize allows embedding
+a `Link` directly in your type. See the [`AsLink`](https://docs.rs/seize/latest/seize/trait.AsLink.html)
+trait for more details.
 
 [hazard pointers]:
   https://www.cs.otago.ac.nz/cosc440/readings/hazard-pointers.pdf
