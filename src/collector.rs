@@ -163,7 +163,7 @@ impl Collector {
         }
     }
 
-    /// Links a value to the collector and allocates it with `Box.
+    /// Links a value to the collector and allocates it with `Box`.
     ///
     /// This is equivalent to:
     ///
