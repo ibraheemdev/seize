@@ -1,4 +1,4 @@
-use crate::tls::ThreadLocal;
+use crate::tls::{Thread, ThreadLocal};
 use crate::utils::CachePadded;
 use crate::{AsLink, Link};
 
@@ -41,7 +41,7 @@ impl Collector {
     // Create a new node.
     pub fn node(&self) -> Node {
         // safety: node counts are only accessed by the current thread
-        let count = unsafe { &mut *self.node_count.load().get() };
+        let count = unsafe { &mut *self.node_count.load(Thread::current()).get() };
         *count += 1;
 
         // record the current epoch value
@@ -69,8 +69,12 @@ impl Collector {
     }
 
     // Mark the current thread as active.
-    pub fn enter(&self) {
-        let reservation = self.reservations.load();
+    //
+    // # Safety
+    //
+    // `Thread` must be the current thread.
+    pub unsafe fn enter(&self, thread: Thread) {
+        let reservation = self.reservations.load(thread);
 
         // calls to `enter` may be reentrant, so we need to keep track of the number
         // of active guards for the current thread
@@ -91,15 +95,24 @@ impl Collector {
     }
 
     // Load an atomic pointer.
+    //
+    // # Safety
+    //
+    // `Thread` must be the current thread.
     #[inline]
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, _ordering: Ordering) -> *mut T {
+    pub unsafe fn protect<T>(
+        &self,
+        ptr: &AtomicPtr<T>,
+        _ordering: Ordering,
+        thread: Thread,
+    ) -> *mut T {
         if self.epoch_frequency.is_none() {
             // epoch tracking is disabled, but pointer loads still need to be seqcst to participate
             // in the total order. see `enter` for details
             return ptr.load(Ordering::SeqCst);
         }
 
-        let reservation = self.reservations.load();
+        let reservation = self.reservations.load(thread);
 
         // load the last epoch we recorded
         //
@@ -138,8 +151,12 @@ impl Collector {
     }
 
     // Mark the current thread as inactive.
-    pub fn leave(&self) {
-        let reservation = self.reservations.load();
+    //
+    // # Safety
+    //
+    // `Thread` must be the current thread.
+    pub unsafe fn leave(&self, thread: Thread) {
+        let reservation = self.reservations.load(thread);
 
         // decrement the active guard count
         let guards = reservation.guards.get();
@@ -160,8 +177,8 @@ impl Collector {
     }
 
     // Decrement any reference counts, keeping the thread marked as active.
-    pub unsafe fn refresh(&self) {
-        let reservation = self.reservations.load();
+    pub unsafe fn refresh(&self, thread: Thread) {
+        let reservation = self.reservations.load(thread);
         let guards = reservation.guards.get();
 
         // we can only decrement reference counts after all guards for the current
@@ -184,12 +201,12 @@ impl Collector {
     // # Safety
     //
     // `ptr` is a valid pointer.
-    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link))
+    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link), thread: Thread)
     where
         T: AsLink,
     {
         // safety: batches are only accessed by the current thread
-        let batch = unsafe { &mut *self.batches.load().get() };
+        let batch = unsafe { &mut *self.batches.load(thread).get() };
 
         // safety: `ptr` is guaranteed to be a valid pointer that can be cast to a node
         let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
@@ -231,21 +248,29 @@ impl Collector {
 
         // attempt to retire the batch if we have enough nodes
         if batch.size % self.batch_size == 0 {
-            self.try_retire(batch);
+            unsafe { self.try_retire(batch, thread) };
         }
     }
 
     // Attempt to retire nodes in the current thread's batch.
-    pub fn try_retire_batch(&self) {
+    //
+    // # Safety
+    //
+    // `Thread` must be the current thread.
+    pub unsafe fn try_retire_batch(&self, thread: Thread) {
         // safety: batches are only accessed by the current thread
-        unsafe { self.try_retire(&mut *self.batches.load().get()) }
+        unsafe { self.try_retire(&mut *self.batches.load(thread).get(), thread) }
     }
 
     // Attempt to retire nodes in this batch.
     //
     // Note that if a guard on the current thread is active, the batch will also be added to it's reservation
     // list for deferred reclamation.
-    pub fn try_retire(&self, batch: &mut Batch) {
+    //
+    // # Safety
+    //
+    // `Thread` must be the current thread.
+    pub unsafe fn try_retire(&self, batch: &mut Batch, thread: Thread) {
         // establish a total order between the retirement of nodes in this batch and stores
         // marking a thread as active (or active in an epoch):
         // - if the store comes first, we will see that the thread is active
@@ -271,7 +296,7 @@ impl Collector {
 
         // safety: TAIL nodes always have `min_epoch` initialized
         let min_epoch = unsafe { (*batch.tail).reservation.min_epoch };
-        let current_reservation = self.reservations.load();
+        let current_reservation = self.reservations.load(thread);
 
         let mut last = batch.head;
 

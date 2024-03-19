@@ -1,4 +1,5 @@
 use crate::raw;
+use crate::tls::Thread;
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
@@ -129,11 +130,13 @@ impl Collector {
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     pub fn enter(&self) -> Guard<'_> {
-        self.raw.enter();
+        let thread = Thread::current();
+        unsafe { self.raw.enter(thread) };
 
         Guard {
-            collector: self,
-            _a: PhantomData,
+            thread,
+            collector: Some(self),
+            _unsend: PhantomData,
         }
     }
 
@@ -202,7 +205,7 @@ impl Collector {
         // note that `add` doesn't actually reclaim the pointer immediately if the
         // current thread is active, it instead adds it to it's reclamation list,
         // but we don't guarantee that publicly.
-        unsafe { self.raw.add(ptr, reclaim) }
+        unsafe { self.raw.add(ptr, reclaim, Thread::current()) }
     }
 
     /// Returns true if both references point to the same collector.
@@ -253,8 +256,11 @@ impl fmt::Debug for Collector {
 ///
 /// See [`Collector::enter`] for details.
 pub struct Guard<'a> {
-    collector: *const Collector,
-    _a: PhantomData<&'a Collector>,
+    collector: Option<&'a Collector>,
+    thread: Thread,
+    // must not be Send or Sync as we are tied to the current threads state in
+    // the collector
+    _unsend: PhantomData<*mut ()>,
 }
 
 impl Guard<'_> {
@@ -275,8 +281,9 @@ impl Guard<'_> {
     /// the unprotected behavior described above.
     pub const unsafe fn unprotected() -> Guard<'static> {
         Guard {
-            collector: ptr::null(),
-            _a: PhantomData,
+            thread: Thread::EMPTY,
+            collector: None,
+            _unsend: PhantomData,
         }
     }
 
@@ -285,12 +292,11 @@ impl Guard<'_> {
     /// See [the guide](crate#protecting-pointers) for details.
     #[inline]
     pub fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
-        if self.collector.is_null() {
+        match self.collector {
+            Some(collector) => unsafe { collector.raw.protect(ptr, ordering, self.thread) },
             // unprotected guard
-            return ptr.load(ordering);
+            None => return ptr.load(ordering),
         }
-
-        unsafe { (*self.collector).raw.protect(ptr, ordering) }
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
@@ -303,12 +309,11 @@ impl Guard<'_> {
     pub unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
-        if self.collector.is_null() {
+        match self.collector {
+            Some(collector) => unsafe { collector.raw.add(ptr, reclaim, self.thread) },
             // unprotected guard
-            return unsafe { (reclaim)(ptr.cast::<Link>()) };
+            None => unsafe { (reclaim)(ptr.cast::<Link>()) },
         }
-
-        unsafe { (*self.collector).raw.add(ptr, reclaim) }
     }
 
     /// Get a reference to the collector this guard we created from.
@@ -319,7 +324,7 @@ impl Guard<'_> {
     /// If this is an [`unprotected`](Guard::unprotected) guard
     /// this method will return `None`.
     pub fn collector(&self) -> Option<&Collector> {
-        unsafe { self.collector.as_ref() }
+        self.collector
     }
 
     /// Refreshes the guard.
@@ -339,11 +344,10 @@ impl Guard<'_> {
     /// If this is an [`unprotected`](Guard::unprotected) guard
     /// this method will be a no-op.
     pub fn refresh(&mut self) {
-        if self.collector.is_null() {
-            return;
+        match self.collector {
+            None => {}
+            Some(collector) => unsafe { collector.raw.refresh(self.thread) },
         }
-
-        unsafe { (*self.collector).raw.refresh() }
     }
 
     /// Flush any retired values in the local batch.
@@ -356,21 +360,17 @@ impl Guard<'_> {
     ///
     /// See [`Collector::batch_size`] for details about batching.
     pub fn flush(&self) {
-        if self.collector.is_null() {
-            return;
+        if let Some(collector) = self.collector {
+            unsafe { collector.raw.try_retire_batch(self.thread) }
         }
-
-        unsafe { (*self.collector).raw.try_retire_batch() }
     }
 }
 
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        if self.collector.is_null() {
-            return;
+        if let Some(collector) = self.collector {
+            unsafe { collector.raw.leave(self.thread) }
         }
-
-        unsafe { (*self.collector).raw.leave() }
     }
 }
 

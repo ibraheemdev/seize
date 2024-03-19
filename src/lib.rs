@@ -9,3 +9,4 @@ mod utils;
 pub mod reclaim;
 
 pub use collector::{AsLink, Collector, Guard, Link, Linked};
+pub use tls::Thread;

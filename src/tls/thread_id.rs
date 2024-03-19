@@ -46,7 +46,7 @@ fn thread_id_manager() -> &'static Mutex<ThreadIdManager> {
 /// Data which is unique to the current thread while it is running.
 /// A thread ID may be reused after a thread exits.
 #[derive(Clone, Copy)]
-pub(crate) struct Thread {
+pub struct Thread {
     pub(crate) id: usize,
     pub(crate) bucket: usize,
     pub(crate) bucket_size: usize,
@@ -54,6 +54,13 @@ pub(crate) struct Thread {
 }
 
 impl Thread {
+    pub const EMPTY: Thread = Thread {
+        id: 0,
+        bucket: 0,
+        bucket_size: 0,
+        index: 0,
+    };
+
     fn new(id: usize) -> Thread {
         let bucket = (usize::BITS as usize) - id.leading_zeros() as usize;
         let bucket_size = 1 << bucket.saturating_sub(1);
@@ -66,6 +73,11 @@ impl Thread {
             index,
         }
     }
+
+    /// Get the current thread.
+    pub fn current() -> Thread {
+        THREAD_HOLDER.with(|holder| holder.0)
+    }
 }
 
 /// Wrapper around `Thread` that allocates and deallocates the ID.
@@ -76,6 +88,7 @@ impl ThreadHolder {
         ThreadHolder(Thread::new(thread_id_manager().lock().unwrap().alloc()))
     }
 }
+
 impl Drop for ThreadHolder {
     fn drop(&mut self) {
         thread_id_manager().lock().unwrap().free(self.0.id);
@@ -83,11 +96,6 @@ impl Drop for ThreadHolder {
 }
 
 thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
-
-/// Get the current thread.
-pub(crate) fn get() -> Thread {
-    THREAD_HOLDER.with(|holder| holder.0)
-}
 
 #[test]
 fn test_thread() {

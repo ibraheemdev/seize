@@ -12,6 +12,8 @@ use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
+pub use thread_id::Thread;
+
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
 pub struct ThreadLocal<T: Send> {
@@ -63,16 +65,14 @@ where
         }
     }
 
-    pub fn load(&self) -> &T
+    pub fn load(&self, thread: Thread) -> &T
     where
         T: Default,
     {
-        self.load_or(T::default)
+        self.load_or(T::default, thread)
     }
 
-    pub fn load_or(&self, create: impl Fn() -> T) -> &T {
-        let thread = thread_id::get();
-
+    pub fn load_or(&self, create: impl Fn() -> T, thread: Thread) -> &T {
         let bucket = unsafe { self.buckets.get_unchecked(thread.bucket) };
         let mut bucket_ptr = bucket.load(Ordering::Acquire);
 
@@ -129,7 +129,7 @@ where
 
     #[cfg(test)]
     fn try_load(&self) -> Option<&T> {
-        let thread = thread_id::get();
+        let thread = Thread::current();
         let bucket_ptr =
             unsafe { self.buckets.get_unchecked(thread.bucket) }.load(Ordering::Acquire);
 
@@ -248,7 +248,8 @@ fn allocate_bucket<T>(size: usize) -> *mut Entry<T> {
 #[cfg(test)]
 #[allow(clippy::redundant_closure)]
 mod tests {
-    use super::ThreadLocal;
+    use super::*;
+
     use std::cell::RefCell;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
@@ -265,11 +266,11 @@ mod tests {
         let create = make_create();
         let tls = ThreadLocal::with_capacity(1);
         assert_eq!(None, tls.try_load());
-        assert_eq!(0, *tls.load_or(|| create()));
+        assert_eq!(0, *tls.load_or(|| create(), Thread::current()));
         assert_eq!(Some(&0), tls.try_load());
-        assert_eq!(0, *tls.load_or(|| create()));
+        assert_eq!(0, *tls.load_or(|| create(), Thread::current()));
         assert_eq!(Some(&0), tls.try_load());
-        assert_eq!(0, *tls.load_or(|| create()));
+        assert_eq!(0, *tls.load_or(|| create(), Thread::current()));
         assert_eq!(Some(&0), tls.try_load());
     }
 
@@ -278,34 +279,34 @@ mod tests {
         let create = make_create();
         let tls = Arc::new(ThreadLocal::with_capacity(1));
         assert_eq!(None, tls.try_load());
-        assert_eq!(0, *tls.load_or(|| create()));
+        assert_eq!(0, *tls.load_or(|| create(), Thread::current()));
         assert_eq!(Some(&0), tls.try_load());
 
         let tls2 = tls.clone();
         let create2 = create.clone();
         thread::spawn(move || {
             assert_eq!(None, tls2.try_load());
-            assert_eq!(1, *tls2.load_or(|| create2()));
+            assert_eq!(1, *tls2.load_or(|| create2(), Thread::current()));
             assert_eq!(Some(&1), tls2.try_load());
         })
         .join()
         .unwrap();
 
         assert_eq!(Some(&0), tls.try_load());
-        assert_eq!(0, *tls.load_or(|| create()));
+        assert_eq!(0, *tls.load_or(|| create(), Thread::current()));
     }
 
     #[test]
     fn iter() {
         let tls = Arc::new(ThreadLocal::with_capacity(1));
-        tls.load_or(|| Box::new(1));
+        tls.load_or(|| Box::new(1), Thread::current());
 
         let tls2 = tls.clone();
         thread::spawn(move || {
-            tls2.load_or(|| Box::new(2));
+            tls2.load_or(|| Box::new(2), Thread::current());
             let tls3 = tls2.clone();
             thread::spawn(move || {
-                tls3.load_or(|| Box::new(3));
+                tls3.load_or(|| Box::new(3), Thread::current());
             })
             .join()
             .unwrap();
@@ -324,10 +325,10 @@ mod tests {
     #[test]
     fn iter_snapshot() {
         let tls = Arc::new(ThreadLocal::with_capacity(1));
-        tls.load_or(|| Box::new(1));
+        tls.load_or(|| Box::new(1), Thread::current());
 
         let iterator = tls.iter();
-        tls.load_or(|| Box::new(2));
+        tls.load_or(|| Box::new(2), Thread::current());
 
         let v = iterator.map(|x| **x).collect::<Vec<i32>>();
         assert_eq!(vec![1], v);
@@ -344,7 +345,7 @@ mod tests {
         }
 
         let dropped = Arc::new(AtomicUsize::new(0));
-        local.load_or(|| Dropped(dropped.clone()));
+        local.load_or(|| Dropped(dropped.clone()), Thread::current());
         assert_eq!(dropped.load(Relaxed), 0);
         drop(local);
         assert_eq!(dropped.load(Relaxed), 1);
