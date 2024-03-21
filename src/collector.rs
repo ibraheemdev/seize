@@ -295,7 +295,7 @@ impl Guard<'_> {
         match self.collector {
             Some(collector) => unsafe { collector.raw.protect(ptr, ordering, self.thread) },
             // unprotected guard
-            None => return ptr.load(ordering),
+            None => ptr.load(ordering),
         }
     }
 
