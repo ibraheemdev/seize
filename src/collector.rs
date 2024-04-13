@@ -365,12 +365,12 @@ impl Guard<'_> {
         }
     }
 
-    // Returns a numeric identifier for the current thread.
-    //
-    // Guards rely on thread-local state, including thread IDs. If you already
-    // have a guard you can use this method to get a cheap identifier for the
-    // current thread, avoiding TLS overhead. Note that thread IDs may be reused,
-    // so the value returned is only unique for the lifetime of this thread.
+    /// Returns a numeric identifier for the current thread.
+    ///
+    /// Guards rely on thread-local state, including thread IDs. If you already
+    /// have a guard you can use this method to get a cheap identifier for the
+    /// current thread, avoiding TLS overhead. Note that thread IDs may be reused,
+    /// so the value returned is only unique for the lifetime of this thread.
     pub fn thread_id(&self) -> usize {
         self.thread.id
     }
