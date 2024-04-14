@@ -29,11 +29,7 @@ impl Collector {
             .unwrap_or(1);
 
         Self {
-            raw: raw::Collector::with_threads(
-                cpus,
-                Self::DEFAULT_EPOCH_TICK,
-                Self::DEFAULT_RETIRE_TICK,
-            ),
+            raw: raw::Collector::new(cpus, Self::DEFAULT_EPOCH_TICK, Self::DEFAULT_RETIRE_TICK),
             unique: Box::into_raw(Box::new(0)),
         }
     }
