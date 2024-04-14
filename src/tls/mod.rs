@@ -251,7 +251,6 @@ mod tests {
     use super::*;
 
     use std::cell::RefCell;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
     use std::sync::Arc;
     use std::thread;
