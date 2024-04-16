@@ -54,13 +54,6 @@ pub struct Thread {
 }
 
 impl Thread {
-    pub const EMPTY: Thread = Thread {
-        id: 0,
-        bucket: 0,
-        bucket_size: 0,
-        index: 0,
-    };
-
     fn new(id: usize) -> Thread {
         let bucket = (usize::BITS as usize) - id.leading_zeros() as usize;
         let bucket_size = 1 << bucket.saturating_sub(1);
@@ -76,26 +69,29 @@ impl Thread {
 
     /// Get the current thread.
     pub fn current() -> Thread {
-        THREAD_HOLDER.with(|holder| holder.0)
+        THREAD.with(|holder| holder.0)
+    }
+
+    /// Get the current thread.
+    pub fn create() -> Thread {
+        Thread::new(thread_id_manager().lock().unwrap().alloc())
+    }
+
+    pub fn free(self) {
+        thread_id_manager().lock().unwrap().free(self.id);
     }
 }
 
 /// Wrapper around `Thread` that allocates and deallocates the ID.
-struct ThreadHolder(Thread);
+struct ThreadGuard(Thread);
 
-impl ThreadHolder {
-    fn new() -> ThreadHolder {
-        ThreadHolder(Thread::new(thread_id_manager().lock().unwrap().alloc()))
-    }
-}
-
-impl Drop for ThreadHolder {
+impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        thread_id_manager().lock().unwrap().free(self.0.id);
+        Thread::free(self.0)
     }
 }
 
-thread_local!(static THREAD_HOLDER: ThreadHolder = ThreadHolder::new());
+thread_local!(static THREAD: ThreadGuard = ThreadGuard(Thread::create()));
 
 #[test]
 fn test_thread() {

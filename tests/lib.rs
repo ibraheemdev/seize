@@ -389,22 +389,12 @@ fn reentrant() {
 }
 
 #[test]
-fn collector_eq() {
+fn belongs_to() {
     let a = Collector::new();
     let b = Collector::new();
-    let unprotected = unsafe { Guard::unprotected() };
 
-    assert!(Collector::ptr_eq(
-        a.enter().collector().unwrap(),
-        a.enter().collector().unwrap()
-    ));
-    assert!(Collector::ptr_eq(
-        a.enter().collector().unwrap(),
-        a.enter().collector().unwrap()
-    ));
-    assert!(!Collector::ptr_eq(
-        a.enter().collector().unwrap(),
-        b.enter().collector().unwrap()
-    ));
-    assert!(unprotected.collector().is_none());
+    assert!(a.enter().belongs_to(&a));
+    assert!(!a.enter().belongs_to(&b));
+    assert!(b.enter().belongs_to(&b));
+    assert!(!b.enter().belongs_to(&a));
 }
