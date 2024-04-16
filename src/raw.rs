@@ -71,7 +71,7 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`.
     pub unsafe fn enter(&self, thread: Thread) {
         let reservation = self.reservations.load(thread);
 
@@ -97,7 +97,7 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`.
     #[inline]
     pub unsafe fn protect<T>(
         &self,
@@ -157,7 +157,7 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`.
     pub unsafe fn leave(&self, thread: Thread) -> bool {
         let reservation = self.reservations.load(thread);
 
@@ -187,7 +187,8 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`. Any
+    // previously protected values may be invalidated.
     pub unsafe fn refresh(&self, thread: Thread) {
         let reservation = self.reservations.load(thread);
         let guards = reservation.guards.get();
@@ -211,7 +212,8 @@ impl Collector {
     //
     // # Safety
     //
-    // `ptr` is a valid pointer, and `thread` must be the current thread.
+    // `ptr` must be a valid pointer that is no longer accessible to any inactive threads.
+    // This method is not safe to call concurrently with the same `thread`.
     pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link), thread: Thread)
     where
         T: AsLink,
@@ -261,7 +263,7 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`.
     pub unsafe fn try_retire_batch(&self, thread: Thread) {
         let local_batch = self
             .batches
@@ -278,7 +280,7 @@ impl Collector {
     //
     // # Safety
     //
-    // `thread` must be the current thread.
+    // This method is not safe to call concurrently with the same `thread`.
     pub unsafe fn try_retire(&self, local_batch: &mut LocalBatch, thread: Thread) {
         // establish a total order between the retirement of nodes in this batch and stores
         // marking a thread as active (or active in an epoch):

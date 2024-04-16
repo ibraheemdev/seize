@@ -6,25 +6,20 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::tls::Thread;
 use crate::{AsLink, Collector, Link};
 
-/// A guard that enables protected loads of atomic pointers.
+/// A guard that enables protected loads of concurrent objects.
+///
+/// This trait provides common functionality implemented by [`LocalGuard`],
+/// [`OwnedGuard`], and [`UnprotectedGuard`].
+///
+/// All guards implement `Clone` using reference counting. A guard is dropped
+/// and the protection of any values is lost after the last reference is dropped.
+///
+/// See [the guide](crate::guide#starting-operations) for an introduction to using guards.
 pub trait Guard: Clone {
-    /// Protects the load of an atomic pointer.
-    ///
-    /// See [the guide](crate#protecting-pointers) for details.
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T;
-
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
-    ///
-    /// This method delays reclamation until the guard is dropped as opposed to
-    /// [`Collector::retire`], which may reclaim objects immediately.
-    ///
-    /// See [the guide](crate#retiring-objects) for details.
-    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
-
     /// Refreshes the guard.
     ///
-    /// Refreshing a guard is similar to dropping and immediately
-    /// creating a new guard. The curent thread remains active, but any
+    /// Calling this method is similar to dropping and immediately
+    /// creating a new guard. The current thread remains active, but any
     /// pointers that were previously protected may be reclaimed.
     ///
     /// # Safety
@@ -47,6 +42,33 @@ pub trait Guard: Clone {
     /// See [`Collector::batch_size`] for details about batching.
     fn flush(&self);
 
+    /// Protects the load of an atomic pointer.
+    ///
+    /// Any valid pointer loaded through a guard using the `protect` method is guaranteed
+    /// to stay valid until the guard is dropped, or the object is retired by the current
+    /// thread. Importantly, if another thread retires this object, it will not be reclaimed
+    /// for the lifetime of this guard.
+    ///
+    /// Note that the lifetime of a guarded pointer is logically tied to that of the
+    /// guard -- when the guard is dropped the pointer is invalidated -- but a raw
+    /// pointer is returned for convenience. Data structures that return shared references
+    /// to values should ensure that the lifetime of the reference is tied to the lifetime
+    /// of a guard.
+    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T;
+
+    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    ///
+    /// This method delays reclamation until the guard is dropped as opposed to
+    /// [`Collector::retire`], which may reclaim objects immediately.
+    ///
+    ///
+    /// # Safety
+    ///
+    /// The retired object must no longer be accessible to any thread that enters
+    /// after it is removed. Additionally, the reclaimer passed to `retire` must
+    /// correctly free values of type `T`.
+    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
+
     /// Returns a numeric identifier for the current thread.
     ///
     /// Guards rely on thread-local state, including thread IDs. If you already
@@ -64,9 +86,14 @@ pub trait Guard: Clone {
 
 /// A guard that keeps the current thread marked as active.
 ///
-/// See [`Collector::enter`] for details.
+/// Local guards are created by calling [`Collector::enter`]. Unlike [`OwnedGuard`],
+/// a local guard is tied to the current thread and does not implement `Send`. This
+/// makes local guards relatively cheap to create and destroy.
+///
+/// Most of the functionality provided by this type is through the [`Guard`] trait.
 pub struct LocalGuard<'a> {
     collector: &'a Collector,
+    // the current thread
     thread: Thread,
     // must not be Send or Sync as we are tied to the current threads state in
     // the collector
@@ -76,6 +103,7 @@ pub struct LocalGuard<'a> {
 impl LocalGuard<'_> {
     pub(crate) fn enter(collector: &Collector) -> LocalGuard<'_> {
         let thread = Thread::current();
+        // safety: only called on the current thread
         unsafe { collector.raw.enter(thread) };
 
         LocalGuard {
@@ -90,6 +118,7 @@ impl Guard for LocalGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
     fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+        // safety: self.thread is the current thread
         unsafe { self.collector.raw.protect(ptr, ordering, self.thread) }
     }
 
@@ -97,16 +126,21 @@ impl Guard for LocalGuard<'_> {
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
+        // safety: - self.thread is the current thread
+        //         - validity of the pointer is guaranteed by the caller
         unsafe { self.collector.raw.add(ptr, reclaim, self.thread) }
     }
 
     /// Refreshes the guard.
     fn refresh(&mut self) {
+        // safety: we have &mut self, and self.thread is the current thread
         unsafe { self.collector.raw.refresh(self.thread) }
     }
 
     /// Flush any retired values in the local batch.
     fn flush(&self) {
+        // note that this does not actually retire any values, it just attempts
+        // to add the batch to any active reservations lists (including ours)
         unsafe { self.collector.raw.try_retire_batch(self.thread) }
     }
 
@@ -124,6 +158,7 @@ impl Guard for LocalGuard<'_> {
 impl Clone for LocalGuard<'_> {
     fn clone(&self) -> Self {
         // this will just increment the guard reference count
+        // safety: self.thread is the current thread
         unsafe { self.collector.raw.enter(self.thread) };
 
         LocalGuard {
@@ -138,6 +173,7 @@ impl Drop for LocalGuard<'_> {
     fn drop(&mut self) {
         // this will mark the thread inactive if this is the last active guard
         // on this thread
+        // safety: self.thread is the current thread
         unsafe { self.collector.raw.leave(self.thread) };
     }
 }
@@ -148,9 +184,16 @@ impl fmt::Debug for LocalGuard<'_> {
     }
 }
 
-/// A guard that protects objects for it's lifetime, independent of the current thread.
+/// A guard that protects objects for it's lifetime, independent of the current
+/// thread.
 ///
-/// See [`Collector::enter_owned`] for details.
+/// Unlike [`LocalGuard`], an owned guard is independent of the current thread,
+/// allowing them to implement `Send`. This is useful for holding guards across `.await`
+/// points in work-stealing schedulers, where execution may be resumed on a different
+/// thread than started on. However, owned guards are more expensive to create and
+/// destroy, so should be avoided if cross-thread usage is not required.
+///
+/// Most of the functionality provided by this type is through the [`Guard`] trait.
 #[derive(Clone)]
 pub struct OwnedGuard<'a>(ManuallyDrop<LocalGuard<'a>>);
 
@@ -165,6 +208,8 @@ impl OwnedGuard<'_> {
     pub(crate) fn enter(collector: &Collector) -> OwnedGuard<'_> {
         OwnedGuard(ManuallyDrop::new(LocalGuard {
             collector,
+            // safety: while this is not the current thread, it is stable
+            // and never accessed concurrently
             thread: Thread::create(),
             _unsend: PhantomData,
         }))
@@ -180,7 +225,7 @@ impl Guard for OwnedGuard<'_> {
 
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
-        // safety: delegation, guaranteed by caller
+        // safety: guaranteed by caller
         unsafe { self.0.defer_retire(ptr, reclaim) }
     }
 

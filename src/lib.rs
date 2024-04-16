@@ -7,6 +7,7 @@ mod raw;
 mod tls;
 mod utils;
 
+pub mod guide;
 pub mod reclaim;
 
 pub use collector::{AsLink, Collector, Link, Linked};

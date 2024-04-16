@@ -293,6 +293,7 @@ fn delayed_retire() {
 
     for object in objects {
         unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
+        guard.flush();
     }
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
