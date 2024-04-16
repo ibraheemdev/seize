@@ -8,7 +8,10 @@ use std::{fmt, ptr};
 
 /// Fast, efficient, and robust memory reclamation.
 ///
-/// See the [crate documentation](crate) for details.
+/// A `Collector` manages the allocation and retirement of concurrent objects.
+/// Objects can be safely loaded through *guards*, which can be created using
+/// the [`enter`](Collector::enter) or [`enter_owned`](Collector::enter_owned)
+/// methods.
 pub struct Collector {
     pub(crate) raw: raw::Collector,
     unique: *mut u8,
@@ -80,18 +83,27 @@ impl Collector {
     }
 
     /// Marks the current thread as active, returning a guard
-    /// that allows protecting loads of atomic pointers. The thread
+    /// that allows protecting loads of concurrent objects. The thread
     /// will be marked as inactive when the guard is dropped.
     ///
-    /// See [the guide](crate#starting-operations) for an introduction
-    /// to using guards.
+    /// See [the guide](crate::guide#starting-operations) for an
+    /// introduction to using guards, or the documentation of [`LocalGuard`]
+    /// for more details.
+    ///
+    /// # Performance
+    ///
+    /// Creating and destroying a guard is about the same as locking and unlocking
+    /// an uncontended `Mutex`, performance-wise. Because of this, guards should
+    /// be re-used across multiple operations if possible. However, note that holding
+    /// a guard prevents the reclamation of any concurrent objects retired during
+    /// it's lifetime, so there is a tradeoff between performance and memory usage.
     ///
     /// # Examples
     ///
     /// ```rust
     /// # use std::sync::atomic::{AtomicPtr, Ordering};
     /// # let collector = seize::Collector::new();
-    /// use seize::{reclaim, Linked};
+    /// use seize::{reclaim, Linked, Guard};
     ///
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
@@ -108,7 +120,7 @@ impl Collector {
     /// ```rust
     /// # use std::sync::atomic::{AtomicPtr, Ordering};
     /// # let collector = seize::Collector::new();
-    /// use seize::{reclaim, Linked};
+    /// use seize::{reclaim, Linked, Guard};
     ///
     /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
     ///
@@ -128,15 +140,21 @@ impl Collector {
         LocalGuard::enter(self)
     }
 
-    /// Create an owned guard that protects objects for it's
-    /// lifetime, independent of the current thread.
+    /// Create an owned guard that protects objects for it's lifetime.
+    ///
+    /// Unlike local guards created with [`enter`](Collector::enter),
+    /// owned guards are independent of the current thread, allowing
+    /// them to implement `Send`. See the documentation of [`OwnedGuard`]
+    /// for more details.
     pub fn enter_owned(&self) -> OwnedGuard<'_> {
         OwnedGuard::enter(self)
     }
 
-    /// Link a value to the collector.
+    /// Create a [`Link`] that can be used to link an object to the collector.
     ///
-    /// See [the guide](crate#allocating-objects) for details.
+    /// This method is useful when working with a DST where the [`Linked`] wrapper
+    /// cannot be used. See [`AsLink`] for details, or use the [`link_value`](Collector::link_value)
+    /// and [`link_boxed`](Collector::link_boxed) helpers.
     pub fn link(&self) -> Link {
         Link {
             node: UnsafeCell::new(self.raw.node()),
@@ -180,10 +198,8 @@ impl Collector {
     /// Retires a value, running `reclaim` when no threads hold a reference to it.
     ///
     /// Note that this method is disconnected from any guards on the current thread,
-    /// so the pointer may be reclaimed immediately. See [`Guard::defer_retire`] if
-    /// the pointer may still be accessed by the current thread.
-    ///
-    /// See [the guide](crate#retiring-objects) for details.
+    /// so the pointer may be reclaimed immediately. Use [`Guard::defer_retire`](crate::Guard::defer_retire)
+    /// if the pointer may still be accessed by the current thread.
     ///
     /// # Safety
     ///
@@ -191,8 +207,49 @@ impl Collector {
     /// after it is removed. It also cannot be accessed by the current thread
     /// after `retire` is called.
     ///
-    /// Additionally, he reclaimer passed to `retire` must correctly deallocate values of type `T`.
-    #[allow(clippy::missing_safety_doc)] // in guide
+    /// Additionally, the reclaimer passed to `retire` must correctly free values of
+    /// type `T`.
+    ///
+    /// # Examples
+    ///
+    /// Common reclaimers are provided by the [`reclaim`](crate::reclaim) module.
+    ///
+    /// ```
+    /// # use std::sync::atomic::{AtomicPtr, Ordering};
+    /// # let collector = seize::Collector::new();
+    /// use seize::{reclaim, Linked};
+    ///
+    /// let ptr = AtomicPtr::new(collector.link_boxed(1_usize));
+    ///
+    /// let guard = collector.enter();
+    /// // store the new value
+    /// let old = ptr.swap(collector.link_boxed(2_usize), Ordering::Release);
+    /// // reclaim the old value
+    /// // safety: the `swap` above made the old value unreachable for any new threads
+    /// unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) };
+    /// # unsafe { collector.retire(ptr.load(Ordering::Relaxed), reclaim::boxed::<Linked<usize>>) };
+    /// ```
+    ///
+    /// Alternative, a custom reclaimer function can be used:
+    ///
+    /// ```
+    /// # use seize::{Link, Collector, Linked};
+    /// # let collector = Collector::new();
+    /// let value = collector.link_boxed(1);
+    ///
+    /// // safety: the value was never shared
+    /// unsafe {
+    ///     collector.retire(value, |link: *mut Link| unsafe {
+    ///         // safety: the value retired was of type *mut Linked<i32>
+    ///         let ptr: *mut Linked<i32> = Link::cast(link);
+    ///
+    ///         // safety: the value was allocated with `link_boxed`
+    ///         let value = Box::from_raw(ptr);
+    ///         println!("dropping {}", value);
+    ///         drop(value);
+    ///     });
+    /// }
+    /// ```
     pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
@@ -209,13 +266,12 @@ impl Collector {
 
 impl Drop for Collector {
     fn drop(&mut self) {
-        unsafe {
-            let _ = Box::from_raw(self.unique);
-        }
+        let _ = unsafe { Box::from_raw(self.unique) };
     }
 }
 
 impl Clone for Collector {
+    /// Creates a new, independent collector with the same configuration as this one.
     fn clone(&self) -> Self {
         Collector::new()
             .batch_size(self.raw.batch_size)
@@ -231,14 +287,13 @@ impl Default for Collector {
 
 impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut strukt = f.debug_struct("Collector");
+        let mut f = f.debug_struct("Collector");
 
         if self.raw.epoch_frequency.is_some() {
-            strukt.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
+            f.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
         }
 
-        strukt
-            .field("batch_size", &self.raw.batch_size)
+        f.field("batch_size", &self.raw.batch_size)
             .field("epoch_frequency", &self.raw.epoch_frequency)
             .finish()
     }
@@ -246,7 +301,9 @@ impl fmt::Debug for Collector {
 
 /// A link to the collector.
 ///
-/// See [the guide](crate#custom-reclaimers) for details.
+/// Functions passed to [`retire`](Collector::retire) are called with a type-erased
+/// `Link` pointer. To extract the underlying value from a link,
+/// you can call the [`cast`](Link::cast) method.
 #[repr(transparent)]
 pub struct Link {
     #[allow(dead_code)]
@@ -267,10 +324,10 @@ impl Link {
 
 /// A type that can be pointer-cast to and from a [`Link`].
 ///
-/// Most reclamation use cases can avoid this trait and work instead
-/// with the [`Linked`] wrapper type. However, if you want more control
-/// over the layout of your type (i.e. are working with a DST),
-/// you may need to implement this trait directly.
+/// Most types can avoid this trait and work instead with the [`Linked`]
+/// wrapper type. However, if you want more control over the layout of your
+/// type (i.e. are working with a DST), you may need to implement this trait
+/// directly.
 ///
 /// # Safety
 ///
@@ -303,14 +360,11 @@ impl Link {
 /// ```
 pub unsafe trait AsLink {}
 
-/// A value [linked](Collector::link) to a collector.
+/// A value linked to a collector.
 ///
-/// This type implements `Deref` and `DerefMut` to the
-/// inner value, so you can access methods on fields
-/// on it as normal. An extra `*` may be needed when
-/// `T` needs to be accessed directly.
-///
-/// See [the guide](crate#allocating-objects) for details.
+/// Objects that may be retired must embed the [`Link`] type. This is a convenience wrapper
+/// for linked values that can be created with the [`Collector::link_value`] or
+/// [`Collector::link_boxed`] methods.
 #[repr(C)]
 pub struct Linked<T> {
     pub link: Link, // Safety Invariant: this field must come first
