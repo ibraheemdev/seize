@@ -48,7 +48,7 @@ criterion_main!(benches);
 
 mod seize_stack {
     use criterion::black_box;
-    use seize::{Collector, Link, Linked};
+    use seize::{Collector, Guard, Link, Linked};
     use std::ptr;
 
     pub struct Stack {

@@ -69,7 +69,7 @@ criterion_group!(benches, treiber_stack);
 criterion_main!(benches);
 
 mod seize_stack {
-    use seize::{reclaim, Collector, Linked};
+    use seize::{reclaim, Collector, Guard, Linked};
     use std::mem::ManuallyDrop;
     use std::ptr;
     use std::sync::atomic::{AtomicPtr, Ordering};

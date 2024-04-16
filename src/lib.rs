@@ -2,10 +2,12 @@
 #![doc = include_str!("../README.md")]
 
 mod collector;
+mod guard;
 mod raw;
 mod tls;
 mod utils;
 
 pub mod reclaim;
 
-pub use collector::{AsLink, Collector, Guard, Link, Linked};
+pub use collector::{AsLink, Collector, Link, Linked};
+pub use guard::{unprotected, Guard, LocalGuard, OwnedGuard, UnprotectedGuard};

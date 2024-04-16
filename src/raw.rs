@@ -65,6 +65,10 @@ impl Collector {
 
     // Mark the current thread as active.
     //
+    // `enter` and `leave` calls maintain a reference count to allow re-entrancy.
+    // If the current thread is already marked as active, this method simply increases
+    // the reference count.
+    //
     // # Safety
     //
     // `thread` must be the current thread.
@@ -147,10 +151,14 @@ impl Collector {
 
     // Mark the current thread as inactive.
     //
+    // `enter` and `leave` calls maintain a reference count to allow re-entrancy.
+    // This method turns `true` if this was the last guard and the thread was marked
+    // as inactive.
+    //
     // # Safety
     //
     // `thread` must be the current thread.
-    pub unsafe fn leave(&self, thread: Thread) {
+    pub unsafe fn leave(&self, thread: Thread) -> bool {
         let reservation = self.reservations.load(thread);
 
         // decrement the active guard count
@@ -168,7 +176,11 @@ impl Collector {
                 // decrement the reference counts of any entries that were added
                 unsafe { Collector::traverse(head) }
             }
+
+            return true;
         }
+
+        false
     }
 
     // Decrement any reference counts, keeping the thread marked as active.
@@ -296,7 +308,7 @@ impl Collector {
         let current_reservation = self.reservations.load(thread);
         let mut marked = 0;
 
-        // record all active threads
+        // record all active threads, including the current thread
         //
         // we need to do this in a separate step before actually retiring to
         // make sure we have enough entries, as the number of threads can grow
