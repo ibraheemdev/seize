@@ -7,6 +7,7 @@ use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{self, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 // Fast, lock-free, robust concurrent memory reclamation.
 //
@@ -63,6 +64,15 @@ impl Collector {
         Node { birth_epoch }
     }
 
+    // Return the reservation for the current thread.
+    //
+    // # Safety
+    //
+    // The reservation must be accessed soundly across multiple threads.
+    pub unsafe fn reservation(&self, thread: Thread) -> &Reservation {
+        self.reservations.load(thread)
+    }
+
     // Mark the current thread as active.
     //
     // `enter` and `leave` calls maintain a reference count to allow re-entrancy.
@@ -71,35 +81,26 @@ impl Collector {
     //
     // # Safety
     //
-    // This method is not safe to call concurrently with the same `thread`.
-    pub unsafe fn enter(&self, thread: Thread) {
-        let reservation = self.reservations.load(thread);
-
-        // calls to `enter` may be reentrant, so we need to keep track of the number
-        // of active guards for the current thread
-        let guards = reservation.guards.get();
-        reservation.guards.set(guards + 1);
-
-        // avoid clearing already active reservation lists
-        if guards == 0 {
-            // mark the thread as active
-            //
-            // seqcst: establish a total order between this store and the fence in `retire`
-            // - if our store comes first, the thread retiring will see that we are active
-            // - if the fence comes first, we will see the new values of any objects being
-            //   retired by that thread (all pointer loads are also seqcst and thus participate
-            //   in the total order)
-            reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
-        }
+    // This method is not safe to call concurrently on the same thread.
+    // This method must only be called if the current thread is inactive.
+    pub unsafe fn enter(&self, reservation: &Reservation) {
+        // mark the thread as active
+        //
+        // seqcst: establish a total order between this store and the fence in `retire`
+        // - if our store comes first, the thread retiring will see that we are active
+        // - if the fence comes first, we will see the new values of any objects being
+        //   retired by that thread (all pointer loads are also seqcst and thus participate
+        //   in the total order)
+        reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
     }
 
     // Load an atomic pointer.
     //
     // # Safety
     //
-    // This method is not safe to call concurrently with the same `thread`.
+    // This method should only ever be called from the same thread.
     #[inline]
-    pub unsafe fn protect<T>(
+    pub unsafe fn protect_local<T>(
         &self,
         ptr: &AtomicPtr<T>,
         _ordering: Ordering,
@@ -124,8 +125,9 @@ impl Collector {
             //   to reservation.head and reservation.epoch for details
             // - acquire the birth epoch of the pointer. we need to record at least
             //   that epoch below to let other threads know we have access to this pointer
-            //   (TOOD: this requires objects to be stored with release ordering, which is
-            //   not documented)
+            //   this requires the pointer to have been stored with release ordering which
+            //   is technically undocumented, but if it was not the resulting pointer would
+            //   be unusable anyways
             let ptr = ptr.load(Ordering::SeqCst);
 
             // relaxed: we acquired at least the pointer's birth epoch above
@@ -149,62 +151,91 @@ impl Collector {
         }
     }
 
-    // Mark the current thread as inactive.
+    // Load an atomic pointer.
     //
-    // `enter` and `leave` calls maintain a reference count to allow re-entrancy.
-    // This method turns `true` if this was the last guard and the thread was marked
-    // as inactive.
+    // This method is safe to call concurrently with the same `thread`.
+    #[inline]
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, _ordering: Ordering, thread: Thread) -> *mut T {
+        if self.epoch_frequency.is_none() {
+            // epoch tracking is disabled, but pointer loads still need to be seqcst to participate
+            // in the total order. see `enter` for details
+            return ptr.load(Ordering::SeqCst);
+        }
+
+        let reservation = self.reservations.load(thread);
+
+        // load the last epoch we recorded
+        //
+        // acquire the global epoch if this was modified by another thread
+        let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
+
+        loop {
+            // seqcst:
+            // - ensure that this load participates in the total order. see the store
+            //   to reservation.head and reservation.epoch for details
+            // - acquire the birth epoch of the pointer. we need to record at least
+            //   that epoch below to let other threads know we have access to this pointer.
+            let ptr = ptr.load(Ordering::SeqCst);
+
+            // relaxed: we acquired at least the pointer's birth epoch above
+            let current_epoch = self.epoch.load(Ordering::Relaxed);
+
+            // we were already marked as active in the birth epoch, so we are safe
+            if prev_epoch == current_epoch {
+                return ptr;
+            }
+
+            // our epoch is out of date, record the new one and try again.
+            // note that this may be called concurrently so we need to ensure
+            // we do not overwrite a later epoch.
+            //
+            // seqcst: establish a total order between this store and the fence in `retire`
+            // - if our store comes first, the thread retiring will see that we are active in
+            //   the current epoch
+            // - if the fence comes first, we will see the new values of any objects being
+            //   retired by that thread (all pointer loads are also seqcst and thus participate
+            //   in the total order)
+            // we also acquire the global epoch if the local epoch is concurrently modified
+            // by another thread
+            prev_epoch = reservation
+                .epoch
+                .fetch_max(current_epoch, Ordering::SeqCst)
+                .max(current_epoch);
+        }
+    }
+
+    // Mark the current thread as inactive.
     //
     // # Safety
     //
-    // This method is not safe to call concurrently with the same `thread`.
-    pub unsafe fn leave(&self, thread: Thread) -> bool {
-        let reservation = self.reservations.load(thread);
+    // This method is not safe to call concurrently on the same thread.
+    // Any previously protected pointers may be invalidated.
+    pub unsafe fn leave(&self, reservation: &Reservation) {
+        // release: exit the critical section
+        // acquire: acquire any new entries
+        let head = reservation.head.swap(Entry::INACTIVE, Ordering::AcqRel);
 
-        // decrement the active guard count
-        let guards = reservation.guards.get();
-        reservation.guards.set(guards - 1);
-
-        // we can only decrement reference counts after all guards for the current thread
-        // are dropped
-        if guards == 1 {
-            // release: exit the critical section
-            // acquire: acquire any new entries
-            let head = reservation.head.swap(Entry::INACTIVE, Ordering::AcqRel);
-
-            if head != Entry::INACTIVE {
-                // decrement the reference counts of any entries that were added
-                unsafe { Collector::traverse(head) }
-            }
-
-            return true;
+        if head != Entry::INACTIVE {
+            // decrement the reference counts of any entries that were added
+            unsafe { Collector::traverse(head) }
         }
-
-        false
     }
 
     // Decrement any reference counts, keeping the thread marked as active.
     //
     // # Safety
     //
-    // This method is not safe to call concurrently with the same `thread`. Any
-    // previously protected values may be invalidated.
-    pub unsafe fn refresh(&self, thread: Thread) {
-        let reservation = self.reservations.load(thread);
-        let guards = reservation.guards.get();
+    // This method is not safe to call concurrently on the same thread.
+    // Any previously protected values may be invalidated.
+    pub unsafe fn refresh(&self, reservation: &Reservation) {
+        // release: exit the critical section
+        // acquire: acquire any new entries and the values of any objects
+        // that were retired
+        let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
 
-        // we can only decrement reference counts after all guards for the current
-        // thread are dropped
-        if guards == 1 {
-            // release: exit the critical section
-            // acquire: acquire any new entries and the values of any objects
-            // that were retired
-            let head = reservation.head.swap(ptr::null_mut(), Ordering::AcqRel);
-
-            if head != Entry::INACTIVE {
-                // decrement the reference counts of any entries that were added
-                unsafe { Collector::traverse(head) }
-            }
+        if head != Entry::INACTIVE {
+            // decrement the reference counts of any entries that were added
+            unsafe { Collector::traverse(head) }
         }
     }
 
@@ -511,13 +542,14 @@ pub union Node {
 // Reservation lists are lists of retired entries, where
 // each entry represents a batch.
 #[repr(C)]
-struct Reservation {
+pub struct Reservation {
     // The head of the list
     head: AtomicPtr<Entry>,
     // The epoch this thread last accessed a pointer in
     epoch: AtomicU64,
     // the number of active guards for this thread
-    guards: Cell<u64>,
+    pub guards: Cell<u64>,
+    pub lock: Mutex<()>,
 }
 
 impl Default for Reservation {
@@ -526,6 +558,7 @@ impl Default for Reservation {
             head: AtomicPtr::new(Entry::INACTIVE),
             epoch: AtomicU64::new(0),
             guards: Cell::new(0),
+            lock: Mutex::new(()),
         }
     }
 }
