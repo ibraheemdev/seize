@@ -63,6 +63,9 @@ pub trait Guard {
     /// The retired object must no longer be accessible to any thread that enters
     /// after it is removed. Additionally, the reclaimer passed to `retire` must
     /// correctly free values of type `T`.
+    ///
+    /// Retiring the same pointer twice can cause **undefined behavior**, even if the
+    /// reclaimer doesn't free memory.
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
 
     /// Returns a numeric identifier for the current thread.

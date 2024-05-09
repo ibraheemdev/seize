@@ -207,6 +207,9 @@ impl Collector {
     /// after it is removed. It also cannot be accessed by the current thread
     /// after `retire` is called.
     ///
+    /// Retiring the same pointer twice can cause **undefined behavior**, even if the
+    /// reclaimer doesn't free memory.
+    ///
     /// Additionally, the reclaimer passed to `retire` must correctly free values of
     /// type `T`.
     ///
