@@ -306,7 +306,7 @@ mod crossbeam_stack {
 
             loop {
                 let head = self.head.load(Ordering::Relaxed, &guard);
-                (*node).next = head.as_raw();
+                node.next = head.as_raw();
 
                 match self.head.compare_exchange(
                     head,
