@@ -8,7 +8,37 @@ fn treiber_stack(c: &mut Criterion) {
         b.iter(|| {
             let stack = Arc::new(haphazard_stack::TreiberStack::new());
 
-            let handles = (0..66)
+            let handles = (0..8)
+                .map(|_| {
+                    let stack = stack.clone();
+                    thread::spawn(move || {
+                        for i in 0..1000 {
+                            stack.push(i);
+                            assert!(stack.pop().is_some());
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for i in 0..1000 {
+                stack.push(i);
+                assert!(stack.pop().is_some());
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            assert!(stack.pop().is_none());
+            assert!(stack.is_empty());
+        })
+    });
+
+    c.bench_function("trieber_stack-crossbeam", |b| {
+        b.iter(|| {
+            let stack = Arc::new(crossbeam_stack::TreiberStack::new());
+
+            let handles = (0..8)
                 .map(|_| {
                     let stack = stack.clone();
                     thread::spawn(move || {
@@ -38,7 +68,7 @@ fn treiber_stack(c: &mut Criterion) {
         b.iter(|| {
             let stack = Arc::new(seize_stack::TreiberStack::new());
 
-            let handles = (0..66)
+            let handles = (0..8)
                 .map(|_| {
                     let stack = stack.clone();
                     thread::spawn(move || {
@@ -71,7 +101,7 @@ criterion_main!(benches);
 mod seize_stack {
     use seize::{reclaim, Collector, Guard, Linked};
     use std::mem::ManuallyDrop;
-    use std::ptr;
+    use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicPtr, Ordering};
 
     #[derive(Debug)]
@@ -103,12 +133,12 @@ mod seize_stack {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
+                let head = guard.protect(&self.head, Ordering::Relaxed);
                 unsafe { (*node).next = head }
 
                 if self
                     .head
-                    .compare_exchange(head, node, Ordering::AcqRel, Ordering::Relaxed)
+                    .compare_exchange(head, node, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     break;
@@ -120,17 +150,13 @@ mod seize_stack {
             let guard = self.collector.enter();
 
             loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
-
-                if head.is_null() {
-                    return None;
-                }
+                let head = NonNull::new(guard.protect(&self.head, Ordering::Acquire))?.as_ptr();
 
                 let next = unsafe { (*head).next };
 
                 if self
                     .head
-                    .compare_exchange(head, next, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange(head, next, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
                 {
                     unsafe {
@@ -218,7 +244,7 @@ mod haphazard_stack {
 
                 if self
                     .head
-                    .compare_exchange(head.as_ptr(), next, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange(head.as_ptr(), next, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
                 {
                     unsafe {
@@ -233,6 +259,103 @@ mod haphazard_stack {
         pub fn is_empty(&self) -> bool {
             let mut h = HazardPointer::new();
             unsafe { h.protect(&self.head) }.is_none()
+        }
+    }
+
+    impl<T> Drop for TreiberStack<T> {
+        fn drop(&mut self) {
+            while self.pop().is_some() {}
+        }
+    }
+}
+
+mod crossbeam_stack {
+    use crossbeam_epoch::{Atomic, Owned, Shared};
+    use std::mem::ManuallyDrop;
+    use std::ptr;
+    use std::sync::atomic::Ordering;
+
+    #[derive(Debug)]
+    pub struct TreiberStack<T> {
+        head: Atomic<Node<T>>,
+    }
+
+    unsafe impl<T: Send> Send for TreiberStack<T> {}
+    unsafe impl<T: Sync> Sync for TreiberStack<T> {}
+
+    #[derive(Debug)]
+    struct Node<T> {
+        data: ManuallyDrop<T>,
+        next: *const Node<T>,
+    }
+
+    impl<T> TreiberStack<T> {
+        pub fn new() -> TreiberStack<T> {
+            TreiberStack {
+                head: Atomic::null(),
+            }
+        }
+
+        pub fn push(&self, value: T) {
+            let guard = crossbeam_epoch::pin();
+
+            let mut node = Owned::new(Node {
+                data: ManuallyDrop::new(value),
+                next: ptr::null_mut(),
+            });
+
+            loop {
+                let head = self.head.load(Ordering::Relaxed, &guard);
+                (*node).next = head.as_raw();
+
+                match self.head.compare_exchange(
+                    head,
+                    node,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                    &guard,
+                ) {
+                    Ok(_) => break,
+                    Err(err) => node = err.new,
+                }
+            }
+        }
+
+        pub fn pop(&self) -> Option<T> {
+            let guard = crossbeam_epoch::pin();
+
+            loop {
+                let head = self.head.load(Ordering::Acquire, &guard);
+
+                if head.is_null() {
+                    return None;
+                }
+
+                let next = unsafe { head.deref().next };
+
+                if self
+                    .head
+                    .compare_exchange(
+                        head,
+                        Shared::from(next),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        &guard,
+                    )
+                    .is_ok()
+                {
+                    unsafe {
+                        let data = ptr::read(&head.deref().data);
+                        guard.defer_destroy(head);
+                        return Some(ManuallyDrop::into_inner(data));
+                    }
+                }
+            }
+        }
+
+        pub fn is_empty(&self) -> bool {
+            let guard = crossbeam_epoch::pin();
+            self.head.load(Ordering::Relaxed, &guard).is_null()
         }
     }
 
