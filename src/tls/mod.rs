@@ -77,7 +77,7 @@ where
         let mut bucket_ptr = bucket.load(Ordering::Acquire);
 
         if bucket_ptr.is_null() {
-            let new_bucket = allocate_bucket(thread.bucket_size);
+            let new_bucket = allocate_bucket(thread.bucket_size());
 
             match bucket.compare_exchange(
                 ptr::null_mut(),
@@ -92,7 +92,7 @@ where
                 Err(other) => unsafe {
                     let _ = Box::from_raw(ptr::slice_from_raw_parts_mut(
                         new_bucket,
-                        thread.bucket_size,
+                        thread.bucket_size(),
                     ));
 
                     bucket_ptr = other;

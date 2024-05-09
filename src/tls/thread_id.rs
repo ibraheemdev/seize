@@ -49,7 +49,6 @@ fn thread_id_manager() -> &'static Mutex<ThreadIdManager> {
 pub struct Thread {
     pub(crate) id: usize,
     pub(crate) bucket: usize,
-    pub(crate) bucket_size: usize,
     pub(crate) index: usize,
 }
 
@@ -59,12 +58,11 @@ impl Thread {
         let bucket_size = 1 << bucket.saturating_sub(1);
         let index = if id != 0 { id ^ bucket_size } else { 0 };
 
-        Thread {
-            id,
-            bucket,
-            bucket_size,
-            index,
-        }
+        Thread { id, bucket, index }
+    }
+
+    pub fn bucket_size(&self) -> usize {
+        1 << self.bucket.saturating_sub(1)
     }
 
     /// Get the current thread.
@@ -98,30 +96,25 @@ fn test_thread() {
     let thread = Thread::new(0);
     assert_eq!(thread.id, 0);
     assert_eq!(thread.bucket, 0);
-    assert_eq!(thread.bucket_size, 1);
     assert_eq!(thread.index, 0);
 
     let thread = Thread::new(1);
     assert_eq!(thread.id, 1);
     assert_eq!(thread.bucket, 1);
-    assert_eq!(thread.bucket_size, 1);
     assert_eq!(thread.index, 0);
 
     let thread = Thread::new(2);
     assert_eq!(thread.id, 2);
     assert_eq!(thread.bucket, 2);
-    assert_eq!(thread.bucket_size, 2);
     assert_eq!(thread.index, 0);
 
     let thread = Thread::new(3);
     assert_eq!(thread.id, 3);
     assert_eq!(thread.bucket, 2);
-    assert_eq!(thread.bucket_size, 2);
     assert_eq!(thread.index, 1);
 
     let thread = Thread::new(19);
     assert_eq!(thread.id, 19);
     assert_eq!(thread.bucket, 5);
-    assert_eq!(thread.bucket_size, 16);
     assert_eq!(thread.index, 3);
 }
