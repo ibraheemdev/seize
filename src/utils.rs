@@ -35,12 +35,6 @@ pub struct CachePadded<T> {
     pub value: T,
 }
 
-impl<T> CachePadded<T> {
-    pub fn new(value: T) -> Self {
-        Self { value }
-    }
-}
-
 impl<T> std::ops::Deref for CachePadded<T> {
     type Target = T;
 
