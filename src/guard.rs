@@ -61,11 +61,13 @@ pub trait Guard {
     /// # Safety
     ///
     /// The retired object must no longer be accessible to any thread that enters
-    /// after it is removed. Additionally, the reclaimer passed to `retire` must
-    /// correctly free values of type `T`.
+    /// after it is removed.
     ///
     /// Retiring the same pointer twice can cause **undefined behavior**, even if the
     /// reclaimer doesn't free memory.
+    ///
+    /// Additionally, the pointer must be valid to access as a [`Link`], per the [`AsLink`] trait,
+    /// and the reclaimer passed to `retire` must correctly free values of type `T`.
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
 
     /// Returns a numeric identifier for the current thread.
@@ -203,7 +205,7 @@ impl fmt::Debug for LocalGuard<'_> {
 /// Most of the functionality provided by this type is through the [`Guard`] trait.
 pub struct OwnedGuard<'a> {
     collector: &'a Collector,
-    // the current thread
+    // an owned thread
     thread: Thread,
 }
 
@@ -281,7 +283,7 @@ impl Drop for OwnedGuard<'_> {
         // safety: we have ownership of `thread`
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
 
-        // safety: self.thread is the current thread
+        // safety: self.thread is an owned thread
         unsafe { self.collector.raw.leave(reservation) };
 
         // we are now inactive and can free the thread slot

@@ -210,8 +210,8 @@ impl Collector {
     /// Retiring the same pointer twice can cause **undefined behavior**, even if the
     /// reclaimer doesn't free memory.
     ///
-    /// Additionally, the reclaimer passed to `retire` must correctly free values of
-    /// type `T`.
+    /// Additionally, the pointer must be valid to access as a [`Link`], per the [`AsLink`]
+    /// trait, and the reclaimer passed to `retire` must correctly free values of type `T`.
     ///
     /// # Examples
     ///

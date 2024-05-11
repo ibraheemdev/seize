@@ -1,9 +1,8 @@
 use crate::tls::{Thread, ThreadLocal};
 use crate::utils::CachePadded;
-use crate::{AsLink, Link};
+use crate::{AsLink, Deferred, Link};
 
 use std::cell::{Cell, UnsafeCell};
-use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{self, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -270,14 +269,11 @@ impl Collector {
         // to the node through this pointer.
         let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
 
-        // if a thread is active in the minimum birth era, it has access to at least one
-        // of the nodes in the batch and must be tracked.
+        // keep track of the oldest node in the batch
         //
         // if epoch tracking is disabled this will always be false (0 > 0).
         let birth_epoch = unsafe { (*node).birth_epoch };
-        if batch.min_epoch > birth_epoch {
-            batch.min_epoch = birth_epoch;
-        }
+        batch.min_epoch = batch.min_epoch.min(birth_epoch);
 
         // create an entry for this node
         batch.entries.push(Entry {
@@ -288,6 +284,54 @@ impl Collector {
 
         // attempt to retire the batch if we have enough entries
         if batch.entries.len() % self.batch_size == 0 {
+            unsafe { self.try_retire(local_batch, thread) }
+        }
+    }
+
+    // Retire a batch of nodes.
+    //
+    // # Safety
+    //
+    // The batch must no longer accessible to any inactive threads.
+    // This method is not safe to call concurrently with the same `thread`.
+    pub unsafe fn add_batch(
+        &self,
+        deferred: &mut Deferred,
+        reclaim: unsafe fn(*mut Link),
+        thread: Thread,
+    ) {
+        // safety: local batches are only accessed by the current thread until retirement
+        let local_batch = unsafe {
+            &mut *self
+                .batches
+                .load_or(|| LocalBatch::new(self.batch_size), thread)
+                .get()
+        };
+
+        // safety: local batch pointers are always valid until reclamation
+        let batch = unsafe { local_batch.0.as_mut() };
+
+        // keep track of the oldest node in the batch
+        let min_epoch = *deferred.min_epoch.get_mut();
+        batch.min_epoch = batch.min_epoch.min(min_epoch);
+
+        // we only want to keep retirement amortized consistently, so only retire if we
+        // hit a multiple of the batch size
+        let mut should_retire = false;
+
+        deferred.for_each(|node| {
+            // create an entry for this node
+            batch.entries.push(Entry {
+                node,
+                reclaim,
+                batch: local_batch.0.as_ptr(),
+            });
+
+            should_retire = should_retire || batch.entries.len() % self.batch_size == 0;
+        });
+
+        // attempt to retire the batch if we got enough entries
+        if should_retire {
             unsafe { self.try_retire(local_batch, thread) }
         }
     }
@@ -419,7 +463,7 @@ impl Collector {
                 }
 
                 // link this node to the reservation list
-                unsafe { *(*curr.node).next = prev }
+                unsafe { (*curr.node).next = prev }
 
                 // release: release the node and entries in this batch
                 match head.compare_exchange_weak(
@@ -465,8 +509,8 @@ impl Collector {
         while !list.is_null() {
             let curr = list;
 
-            // safety: `curr` is a valid node in the list
-            list = unsafe { *(*(*curr).node).next };
+            // safety: `curr` is a valid non-null node in the list
+            list = unsafe { (*(*curr).node).next };
             let batch = unsafe { (*curr).batch };
 
             // safety: batch pointers are valid for reads until they are freed
@@ -518,11 +562,13 @@ impl Drop for Collector {
 #[repr(C)]
 pub union Node {
     // Before retiring: the epoch this node was created in
-    birth_epoch: u64,
+    pub birth_epoch: u64,
     // While retiring: temporary location for an active reservation list.
     head: *const AtomicPtr<Entry>,
     // After retiring: next node in the thread's reservation list
-    next: ManuallyDrop<*mut Entry>,
+    next: *mut Entry,
+    // In deferred batch: next node in the batch
+    pub next_batch: *mut Node,
 }
 
 // A per-thread reservation list.

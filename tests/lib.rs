@@ -1,35 +1,36 @@
-use seize::{reclaim, Collector, Guard, Linked};
+use seize::{reclaim, Collector, Deferred, Guard, Linked};
 
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
 use std::{ptr, thread};
 
 struct DropTrack(Arc<AtomicUsize>);
 
 impl Drop for DropTrack {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::Release);
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 struct UnsafeSend<T>(T);
-
 unsafe impl<T> Send for UnsafeSend<T> {}
 
 #[test]
 fn single_thread() {
     let collector = Arc::new(Collector::new().batch_size(2));
-
     let dropped = Arc::new(AtomicUsize::new(0));
 
-    for _ in 0..22 {
+    // multiple of 2
+    let items = cfg::ITEMS & !1;
+
+    for _ in 0..items {
         let zero = AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone())));
 
         {
             let guard = collector.enter();
-            let _ = guard.protect(&zero, Ordering::Acquire);
+            let _ = guard.protect(&zero, Ordering::Relaxed);
         }
 
         {
@@ -39,7 +40,7 @@ fn single_thread() {
         }
     }
 
-    assert_eq!(dropped.load(Ordering::Acquire), 22);
+    assert_eq!(dropped.load(Ordering::Relaxed), items);
 }
 
 #[test]
@@ -49,7 +50,7 @@ fn two_threads() {
     let a_dropped = Arc::new(AtomicUsize::new(0));
     let b_dropped = Arc::new(AtomicUsize::new(0));
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = mpsc::channel();
 
     let one = Arc::new(AtomicPtr::new(
         collector.link_boxed(DropTrack(a_dropped.clone())),
@@ -98,23 +99,23 @@ fn two_threads() {
 fn refresh() {
     let collector = Arc::new(Collector::new().batch_size(3));
 
-    let nums = (0..cfg::ITEMS)
+    let items = (0..cfg::ITEMS)
         .map(|i| AtomicPtr::new(collector.link_boxed(i)))
         .collect::<Arc<[_]>>();
 
     let handles = (0..cfg::THREADS)
         .map(|_| {
             thread::spawn({
-                let nums = nums.clone();
+                let items = items.clone();
                 let collector = collector.clone();
 
                 move || {
                     let mut guard = collector.enter();
 
                     for _ in 0..cfg::ITER {
-                        for n in nums.iter() {
-                            let n = guard.protect(n, Ordering::Acquire);
-                            unsafe { assert!(**n < 10_000) }
+                        for item in items.iter() {
+                            let item = guard.protect(item, Ordering::Acquire);
+                            unsafe { assert!(**item < cfg::ITEMS) }
                         }
 
                         guard.refresh();
@@ -125,8 +126,8 @@ fn refresh() {
         .collect::<Vec<_>>();
 
     for i in 0..cfg::ITER {
-        for n in nums.iter() {
-            let old = n.swap(collector.link_boxed(i), Ordering::AcqRel);
+        for item in items.iter() {
+            let old = item.swap(collector.link_boxed(i), Ordering::AcqRel);
             unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
         }
     }
@@ -136,14 +137,91 @@ fn refresh() {
     }
 
     // cleanup
-    for n in nums.iter() {
-        let old = n.swap(ptr::null_mut(), Ordering::Acquire);
+    for item in items.iter() {
+        let old = item.swap(ptr::null_mut(), Ordering::Acquire);
         unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
     }
 }
 
 #[test]
-fn delayed_retire() {
+fn deferred() {
+    let collector = Arc::new(Collector::new().batch_size(2));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let items = cfg::ITEMS & !1;
+
+    let mut batch = Deferred::new();
+    let guard = collector.enter();
+    for _ in 0..items {
+        let zero = AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone())));
+        let value = guard.protect(&zero, Ordering::Acquire);
+        unsafe { batch.defer(value) };
+    }
+
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<DropTrack>>) };
+    // guard is still active
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    drop(guard);
+    // now everything should be retired
+    assert_eq!(dropped.load(Ordering::Relaxed), items);
+}
+
+#[test]
+fn deferred_concurrent() {
+    let collector = Arc::new(Collector::new().batch_size(3));
+
+    let items = (0..cfg::ITEMS)
+        .map(|i| AtomicPtr::new(collector.link_boxed(i)))
+        .collect::<Arc<[_]>>();
+
+    let handles = (0..cfg::THREADS)
+        .map(|_| {
+            thread::spawn({
+                let items = items.clone();
+                let collector = collector.clone();
+
+                move || {
+                    let mut guard = collector.enter();
+
+                    for _ in 0..cfg::ITER {
+                        for item in items.iter() {
+                            let item = guard.protect(item, Ordering::Acquire);
+                            unsafe { assert!(**item < cfg::ITEMS) }
+                        }
+
+                        guard.refresh();
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for i in 0..cfg::ITER {
+        let mut batch = Deferred::new();
+        for item in items.iter() {
+            let old = item.swap(collector.link_boxed(i), Ordering::AcqRel);
+            unsafe { batch.defer(old) };
+        }
+
+        // retire all items
+        unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<usize>>) }
+    }
+
+    for handle in handles {
+        handle.join().unwrap()
+    }
+
+    // cleanup
+    let mut batch = Deferred::new();
+    for item in items.iter() {
+        let old = item.swap(ptr::null_mut(), Ordering::Acquire);
+        unsafe { batch.defer(old) };
+    }
+    unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<usize>>) }
+}
+
+#[test]
+fn defer_retire() {
     let collector = Collector::new().batch_size(5);
     let dropped = Arc::new(AtomicUsize::new(0));
 
@@ -158,8 +236,10 @@ fn delayed_retire() {
         guard.flush();
     }
 
+    // guard is still active
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     drop(guard);
+    // now the objects should have been dropped
     assert_eq!(dropped.load(Ordering::Relaxed), 30);
 }
 
@@ -345,88 +425,9 @@ fn belongs_to() {
 
 #[test]
 fn stress() {
-    #[derive(Debug)]
-    pub struct TreiberStack<T> {
-        head: AtomicPtr<Linked<Node<T>>>,
-        collector: Collector,
-    }
-
-    #[derive(Debug)]
-    struct Node<T> {
-        data: ManuallyDrop<T>,
-        next: *mut Linked<Node<T>>,
-    }
-
-    impl<T> TreiberStack<T> {
-        pub fn new(batch_size: usize) -> TreiberStack<T> {
-            TreiberStack {
-                head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new()
-                    .batch_size(batch_size)
-                    .epoch_frequency(NonZeroU64::new(1)),
-            }
-        }
-
-        pub fn push(&self, t: T, guard: &impl Guard) {
-            let new = self.collector.link_boxed(Node {
-                data: ManuallyDrop::new(t),
-                next: ptr::null_mut(),
-            });
-
-            loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
-                unsafe { (*new).next = head }
-
-                if self
-                    .head
-                    .compare_exchange(head, new, Ordering::Release, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-        }
-
-        pub fn pop(&self, guard: &impl Guard) -> Option<T> {
-            loop {
-                let head = guard.protect(&self.head, Ordering::Acquire);
-
-                if head.is_null() {
-                    return None;
-                }
-
-                let next = unsafe { (*head).next };
-
-                if self
-                    .head
-                    .compare_exchange(head, next, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    unsafe {
-                        let data = ptr::read(&(*head).data);
-                        self.collector
-                            .retire(head, reclaim::boxed::<Linked<Node<T>>>);
-                        return Some(ManuallyDrop::into_inner(data));
-                    }
-                }
-            }
-        }
-
-        pub fn is_empty(&self) -> bool {
-            let guard = self.collector.enter();
-            guard.protect(&self.head, Ordering::Relaxed).is_null()
-        }
-    }
-
-    impl<T> Drop for TreiberStack<T> {
-        fn drop(&mut self) {
-            let guard = self.collector.enter();
-            while self.pop(&guard).is_some() {}
-        }
-    }
-
+    // stress test with operation on a shared stack
     for _ in 0..cfg::ITER {
-        let stack = Arc::new(TreiberStack::new(1));
+        let stack = Arc::new(Stack::new(1));
 
         thread::scope(|s| {
             for i in 0..cfg::ITEMS {
@@ -447,10 +448,13 @@ fn stress() {
         assert!(stack.pop(&stack.collector.enter()).is_none());
         assert!(stack.is_empty());
     }
+}
 
-    // run the same test with all threads sharing an owned guard
+#[test]
+fn shared_owned_stress() {
+    // all threads sharing an owned guard
     for _ in 0..cfg::ITER {
-        let stack = Arc::new(TreiberStack::new(1));
+        let stack = Arc::new(Stack::new(1));
         let guard = &stack.collector.enter_owned();
 
         thread::scope(|s| {
@@ -474,16 +478,126 @@ fn stress() {
     }
 }
 
+#[test]
+fn owned_stress() {
+    // all threads creating an owned guard (this is very unrealistic and stresses tls
+    // synchronization)
+    for _ in 0..cfg::ITER {
+        let stack = Arc::new(Stack::new(1));
+
+        thread::scope(|s| {
+            for i in 0..cfg::ITEMS {
+                let guard = &stack.collector.enter_owned();
+                stack.push(i, guard);
+                stack.pop(guard);
+            }
+
+            for _ in 0..cfg::THREADS {
+                s.spawn(|| {
+                    for i in 0..cfg::ITEMS {
+                        let guard = &stack.collector.enter_owned();
+                        stack.push(i, guard);
+                        stack.pop(guard);
+                    }
+                });
+            }
+        });
+
+        assert!(stack.pop(&stack.collector.enter_owned()).is_none());
+        assert!(stack.is_empty());
+    }
+}
+
+#[derive(Debug)]
+pub struct Stack<T> {
+    head: AtomicPtr<Linked<Node<T>>>,
+    collector: Collector,
+}
+
+#[derive(Debug)]
+struct Node<T> {
+    data: ManuallyDrop<T>,
+    next: *mut Linked<Node<T>>,
+}
+
+impl<T> Stack<T> {
+    pub fn new(batch_size: usize) -> Stack<T> {
+        Stack {
+            head: AtomicPtr::new(ptr::null_mut()),
+            collector: Collector::new()
+                .batch_size(batch_size)
+                .epoch_frequency(NonZeroU64::new(1)),
+        }
+    }
+
+    pub fn push(&self, t: T, guard: &impl Guard) {
+        let new = self.collector.link_boxed(Node {
+            data: ManuallyDrop::new(t),
+            next: ptr::null_mut(),
+        });
+
+        loop {
+            let head = guard.protect(&self.head, Ordering::Relaxed);
+            unsafe { (*new).next = head }
+
+            if self
+                .head
+                .compare_exchange(head, new, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    pub fn pop(&self, guard: &impl Guard) -> Option<T> {
+        loop {
+            let head = guard.protect(&self.head, Ordering::Acquire);
+
+            if head.is_null() {
+                return None;
+            }
+
+            let next = unsafe { (*head).next };
+
+            if self
+                .head
+                .compare_exchange(head, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                unsafe {
+                    let data = ptr::read(&(*head).data);
+                    self.collector
+                        .retire(head, reclaim::boxed::<Linked<Node<T>>>);
+                    return Some(ManuallyDrop::into_inner(data));
+                }
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let guard = self.collector.enter();
+        guard.protect(&self.head, Ordering::Relaxed).is_null()
+    }
+}
+
+impl<T> Drop for Stack<T> {
+    fn drop(&mut self) {
+        let guard = self.collector.enter();
+        while self.pop(&guard).is_some() {}
+    }
+}
+
 #[cfg(miri)]
 mod cfg {
     pub const THREADS: usize = 4;
     pub const ITEMS: usize = 100;
-    pub const ITER: usize = 1;
+    pub const ITER: usize = 8;
 }
 
 #[cfg(not(miri))]
 mod cfg {
     pub const THREADS: usize = 32;
     pub const ITEMS: usize = 10_000;
-    pub const ITER: usize = 100;
+    pub const ITER: usize = 50;
 }
