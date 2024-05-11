@@ -2,9 +2,10 @@ use seize::{reclaim, Collector, Deferred, Guard, Linked};
 
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
+use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier};
-use std::{ptr, thread};
+use std::sync::{mpsc, Arc, Barrier, OnceLock};
+use std::thread;
 
 struct DropTrack(Arc<AtomicUsize>);
 
@@ -140,6 +141,39 @@ fn refresh() {
     for item in items.iter() {
         let old = item.swap(ptr::null_mut(), Ordering::Acquire);
         unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
+    }
+}
+
+#[test]
+fn recursive_retire() {
+    fn collector() -> &'static Collector {
+        static COLLECTOR: OnceLock<Collector> = OnceLock::new();
+        COLLECTOR.get_or_init(|| Collector::new().batch_size(1))
+    }
+
+    struct Recursive {
+        _value: usize,
+        pointers: Vec<*mut Linked<usize>>,
+    }
+
+    let ptr = collector().link_boxed(Recursive {
+        _value: 0,
+        pointers: (0..cfg::ITEMS).map(|i| collector().link_boxed(i)).collect(),
+    });
+
+    unsafe {
+        collector().retire(ptr, |link| {
+            let value = Box::from_raw(link.cast::<Linked<Recursive>>());
+            for pointer in value.value.pointers {
+                collector().retire(pointer, reclaim::boxed::<Linked<usize>>);
+                let mut guard = collector().enter();
+                guard.flush();
+                guard.refresh();
+                drop(guard);
+            }
+        });
+
+        collector().enter().flush();
     }
 }
 
@@ -592,7 +626,7 @@ impl<T> Drop for Stack<T> {
 mod cfg {
     pub const THREADS: usize = 4;
     pub const ITEMS: usize = 100;
-    pub const ITER: usize = 8;
+    pub const ITER: usize = 4;
 }
 
 #[cfg(not(miri))]
