@@ -35,9 +35,8 @@ use crate::{AsLink, Collector, Link};
 /// let mut batch = Deferred::new();
 ///
 /// for item in items.iter() {
-///     let new = collector.link_boxed(0);
 ///     // make the item unreachable with an atomic swap
-///     let old = item.swap(new, Ordering::AcqRel);
+///     let old = item.swap(std::ptr::null_mut(), Ordering::AcqRel);
 ///     // don't retire just yet, add the node to the batch
 ///     unsafe { batch.defer(old) };
 /// }
