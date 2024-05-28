@@ -36,7 +36,7 @@ used for objects that have been retired, allowing it to avoid the high overhead
 incurred by traditional reference counting schemes where every memory access requires
 modifying shared memory. Reclamation is naturally balanced as the thread with the last
 reference to an object is the one that frees it, leading to predictable latency without
-sacrificing memory efficiency. Epochs can also be optionally tracked to protect against
+sacrificing performance. Epochs can also be optionally tracked to protect against
 stalled threads, making reclamation truly lock-free.
 
 Seize provides performance competitive with that of epoch based schemes, while memory efficiency
