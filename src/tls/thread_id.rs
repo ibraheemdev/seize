@@ -8,7 +8,6 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::{Mutex, OnceLock};
-use std::usize;
 
 /// Thread ID manager which allocates thread IDs. It attempts to aggressively
 /// reuse thread IDs where possible to avoid cases where a ThreadLocal grows
