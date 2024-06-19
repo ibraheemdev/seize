@@ -23,21 +23,20 @@ and robust but generally much slower.
 
 Another problem that is often not considered is workload balancing. In most
 reclamation schemes, the thread that retires an object is the one that reclaims
-it. This leads to unbalanced reclamation in read-dominated workloads;
-parallelism is degraded when only a fraction of threads are writing. This is
-especially prevalent with the use of M:N threading models as provided by
-asynchronous runtimes like [Tokio].
+it. This leads to unbalanced reclamation in read-dominated workloads; parallelism
+is reduced when only a fraction of threads are writing, degrading memory efficiency.
 
 # Implementation
 
 Seize is based on the [hyaline reclamation scheme], which uses reference counting
 to determine when it is safe to free memory. However, reference counters are only
-used for objects that have been retired, allowing it to avoid the high overhead
-incurred by traditional reference counting schemes where every memory access requires
-modifying shared memory. Reclamation is naturally balanced as the thread with the last
-reference to an object is the one that frees it, leading to predictable latency without
-sacrificing performance. Epochs can also be optionally tracked to protect against
-stalled threads, making reclamation truly lock-free.
+used for already retired objects, allowing it to avoid the high overhead incurred
+by traditional reference counting schemes where every memory access requires modifying
+shared memory. Reclamation is naturally balanced as the thread with the last reference
+to an object is the one that frees it. This removes the need to check whether other
+threads have made progress, leading to predictable latency without sacrificing performance.
+Epochs can also be tracked to protect against stalled threads, making reclamation truly
+lock-free.
 
 Seize provides performance competitive with that of epoch based schemes, while memory efficiency
 is similar to that of hazard pointers. Seize is compatible with all modern hardware that
