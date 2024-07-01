@@ -263,11 +263,10 @@ impl Collector {
         // to the node through this pointer.
         let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
 
+        // safety: the node and batch are both valid, and we do not hold a mutable
+        // reference across the call to try_retire
         unsafe {
             // keep track of the oldest node in the batch
-            //
-            // safety: the node and batch are both valid, and we do not hold a mutable
-            // reference across the call to try_retire
             let birth_epoch = (*node).birth_epoch;
             (*batch).min_epoch = (*batch).min_epoch.min(birth_epoch);
 
@@ -498,7 +497,7 @@ impl Collector {
             // safety: the reference count is 0, meaning that either no threads were active,
             // or they have all already decremented the reference count
             //
-            // addtionally, the local batch has been reset, and we are not holding on to any mutable
+            // additionally, the local batch has been reset and we are not holding on to any mutable
             // pointers, so any recursive calls to retire during reclamation are valid
             unsafe { Collector::free_batch(batch) }
             return;
