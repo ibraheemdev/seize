@@ -2,9 +2,9 @@ use crate::tls::Thread;
 use crate::{raw, LocalGuard, OwnedGuard};
 
 use std::cell::UnsafeCell;
+use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::atomic::Ordering;
-use std::{fmt, ptr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Fast, efficient, and robust memory reclamation.
 ///
@@ -13,8 +13,8 @@ use std::{fmt, ptr};
 /// the [`enter`](Collector::enter) or [`enter_owned`](Collector::enter_owned)
 /// methods.
 pub struct Collector {
+    id: usize,
     pub(crate) raw: raw::Collector,
-    unique: *mut u8,
 }
 
 unsafe impl Send for Collector {}
@@ -26,13 +26,15 @@ impl Collector {
 
     /// Creates a new collector.
     pub fn new() -> Self {
+        static ID: AtomicUsize = AtomicUsize::new(0);
+
         let cpus = std::thread::available_parallelism()
             .map(Into::into)
             .unwrap_or(1);
 
         Self {
             raw: raw::Collector::new(cpus, Self::DEFAULT_EPOCH_TICK, Self::DEFAULT_RETIRE_TICK),
-            unique: Box::into_raw(Box::new(0)),
+            id: ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -284,14 +286,8 @@ impl Collector {
         unsafe { self.raw.reclaim_all() };
     }
 
-    pub(crate) fn ptr_eq(this: &Collector, other: &Collector) -> bool {
-        ptr::eq(this.unique, other.unique)
-    }
-}
-
-impl Drop for Collector {
-    fn drop(&mut self) {
-        let _ = unsafe { Box::from_raw(self.unique) };
+    pub(crate) fn id_eq(this: &Collector, other: &Collector) -> bool {
+        this.id == other.id
     }
 }
 
