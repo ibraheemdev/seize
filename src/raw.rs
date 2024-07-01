@@ -255,6 +255,12 @@ impl Collector {
         // safety: local batches are only accessed by the current thread
         let batch = unsafe { (*local_batch).get_or_init(self.batch_size) };
 
+        // if we are in a recursive call during drop, reclaim immediately
+        if batch == LocalBatch::DROP {
+            unsafe { reclaim(ptr.cast::<Link>()) }
+            return;
+        }
+
         // `ptr` is guaranteed to be a valid pointer that can be cast to a node (`T: AsLink`)
         //
         // any other thread with a reference to the pointer only has a shared
@@ -300,6 +306,12 @@ impl Collector {
 
         // safety: local batches are only accessed by the current thread
         let batch = unsafe { (*local_batch).get_or_init(self.batch_size) };
+
+        // if we are in a recursive call during drop, reclaim immediately
+        if batch == LocalBatch::DROP {
+            deferred.for_each(|ptr| unsafe { reclaim(ptr.cast::<Link>()) });
+            return;
+        }
 
         // keep track of the oldest node in the batch
         let min_epoch = *deferred.min_epoch.get_mut();
@@ -368,7 +380,7 @@ impl Collector {
         let batch = unsafe { (*local_batch).batch };
 
         // there is nothing to retire
-        if batch.is_null() {
+        if batch.is_null() || batch == LocalBatch::DROP {
             return;
         }
 
@@ -536,6 +548,35 @@ impl Collector {
         }
     }
 
+    // Reclaim all values in the collector, including recursive calls to retire.
+    //
+    // # Safety
+    //
+    // No threads may be accessing the collector or any values that have been retired.
+    pub unsafe fn reclaim_all(&self) {
+        for local_batch in self.batches.iter() {
+            let local_batch = local_batch.value.get();
+
+            unsafe {
+                let batch = (*local_batch).batch;
+
+                // there is nothing to reclaim
+                if batch.is_null() {
+                    continue;
+                }
+
+                // tell any recursive calls to `retire` to reclaim immediately
+                (*local_batch).batch = LocalBatch::DROP;
+
+                // safety: we have &mut self and the batch is non-null
+                Collector::free_batch(batch);
+
+                // reset the batch
+                (*local_batch).batch = ptr::null_mut();
+            }
+        }
+    }
+
     // Free a reservation list.
     //
     // # Safety
@@ -556,20 +597,8 @@ impl Collector {
 
 impl Drop for Collector {
     fn drop(&mut self) {
-        for batch in self.batches.iter() {
-            unsafe {
-                // safety: we have &mut self
-                let batch = (*batch.value.get()).batch;
-
-                // there is nothing to reclaim
-                if batch.is_null() {
-                    continue;
-                }
-
-                // safety: we have &mut self and the batch is non-null
-                Collector::free_batch(batch);
-            }
-        }
+        // safety: we have &mut self
+        unsafe { self.reclaim_all() };
     }
 }
 
@@ -651,7 +680,7 @@ impl Entry {
     //
     // While null indicates an empty list, INACTIVE indicates the thread has no active
     // guards and is not accessing any objects.
-    pub const INACTIVE: *mut Entry = -1_isize as usize as _;
+    pub const INACTIVE: *mut Entry = usize::MAX as _;
 }
 
 // A pointer to a batch, unique to the current thread.
@@ -668,6 +697,10 @@ impl Default for LocalBatch {
 }
 
 impl LocalBatch {
+    // This is set during a call to reclaim_all, signalling recursive calls to retire
+    // to reclaim immediately.
+    const DROP: *mut Batch = usize::MAX as _;
+
     // Return a pointer to the batch, initializing it if the batch was null.
     fn get_or_init(&mut self, capacity: usize) -> *mut Batch {
         if self.batch.is_null() {

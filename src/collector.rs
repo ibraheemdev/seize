@@ -262,6 +262,28 @@ impl Collector {
         unsafe { self.raw.add(ptr, reclaim, Thread::current()) }
     }
 
+    /// Reclaim any values that have been retired.
+    ///
+    /// This method reclaims any objects that have been retired across *all* threads.
+    /// After calling this method, any values that were previous retired, or retired
+    /// recursively on the current thread during this call, will have been reclaimed.
+    ///
+    /// # Safety
+    ///
+    /// This function is **extremely unsafe** to call. It is only sound when no threads are
+    /// currently active, whether accessing values that have been retired or accessing the
+    /// collector through any type of guard. This is akin to having a unique reference to the
+    /// collector. However, this method takes a shared reference, as reclaimers to be run by this
+    /// thread are allowed to access the collector recursively.
+    ///
+    /// # Notes
+    ///
+    /// Note that if reclaimers initialize guards across threads, or initialize owned guards,
+    /// objects retired through those guards may not be reclaimed.
+    pub unsafe fn reclaim_all(&self) {
+        unsafe { self.raw.reclaim_all() };
+    }
+
     pub(crate) fn ptr_eq(this: &Collector, other: &Collector) -> bool {
         ptr::eq(this.unique, other.unique)
     }

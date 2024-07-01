@@ -178,6 +178,66 @@ fn recursive_retire() {
 }
 
 #[test]
+fn reclaim_all() {
+    let collector = Collector::new().batch_size(2);
+
+    for _ in 0..cfg::ITER {
+        let dropped = Arc::new(AtomicUsize::new(0));
+
+        let items = (0..cfg::ITEMS)
+            .map(|_| AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone()))))
+            .collect::<Vec<_>>();
+
+        for item in items {
+            unsafe {
+                collector.retire(
+                    item.load(Ordering::Relaxed),
+                    reclaim::boxed::<Linked<DropTrack>>,
+                )
+            };
+        }
+
+        unsafe { collector.reclaim_all() };
+        assert_eq!(dropped.load(Ordering::Relaxed), cfg::ITEMS);
+    }
+}
+
+#[test]
+fn recursive_retire_reclaim_all() {
+    struct Recursive {
+        _value: usize,
+        collector: *mut Collector,
+        pointers: Vec<*mut Linked<DropTrack>>,
+    }
+
+    unsafe {
+        // make sure retire runs in drop, not immediately
+        let collector = Box::into_raw(Box::new(Collector::new().batch_size(cfg::ITEMS * 2)));
+        let dropped = Arc::new(AtomicUsize::new(0));
+
+        let ptr = (*collector).link_boxed(Recursive {
+            _value: 0,
+            collector,
+            pointers: (0..cfg::ITEMS)
+                .map(|_| (*collector).link_boxed(DropTrack(dropped.clone())))
+                .collect(),
+        });
+
+        (*collector).retire(ptr, |link| {
+            let value = Box::from_raw(link.cast::<Linked<Recursive>>());
+            let collector = value.value.collector;
+            for pointer in value.value.pointers {
+                (*collector).retire(pointer, reclaim::boxed::<Linked<DropTrack>>);
+            }
+        });
+
+        (*collector).reclaim_all();
+        assert_eq!(dropped.load(Ordering::Relaxed), cfg::ITEMS);
+        let _ = Box::from_raw(collector);
+    }
+}
+
+#[test]
 fn deferred() {
     let collector = Arc::new(Collector::new().batch_size(2));
     let dropped = Arc::new(AtomicUsize::new(0));
