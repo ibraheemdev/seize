@@ -17,7 +17,7 @@ use crate::{AsLink, Collector, Link};
 /// concurrently. It is not meant to be used to amortize the cost of retirement, which is done
 /// through thread-local batches controlled with [`Collector::batch_size`], as access from a single-thread
 /// can be more expensive than is required. Deferred batches are useful when you need to control when
-/// a batch of nodes is retired directly, a relatively rare use case.
+/// a batch of objects is retired directly, a relatively rare use case.
 ///
 /// # Examples
 ///
@@ -31,13 +31,13 @@ use crate::{AsLink, Collector, Link};
 ///     .map(|i| AtomicPtr::new(collector.link_boxed(i)))
 ///     .collect::<Arc<[_]>>();
 ///
-/// // create a batch of nodes to retire
+/// // create a batch of objects to retire
 /// let mut batch = Deferred::new();
 ///
 /// for item in items.iter() {
 ///     // make the item unreachable with an atomic swap
 ///     let old = item.swap(std::ptr::null_mut(), Ordering::AcqRel);
-///     // don't retire just yet, add the node to the batch
+///     // don't retire just yet, add the object to the batch
 ///     unsafe { batch.defer(old) };
 /// }
 ///
@@ -51,7 +51,7 @@ pub struct Deferred {
 }
 
 impl Deferred {
-    /// Create a new batch of deferred nodes.
+    /// Create a new batch of deferred objects.
     pub const fn new() -> Deferred {
         Deferred {
             head: AtomicPtr::new(ptr::null_mut()),
@@ -98,14 +98,14 @@ impl Deferred {
     }
 
     /// Retires a batch of values, running `reclaim` when no threads hold a reference to any
-    /// nodes in the batch.
+    /// objects in the batch.
     ///
     /// Note that this method is disconnected from any guards on the current thread,
     /// so the pointers may be reclaimed immediately.
     ///
     /// # Safety
     ///
-    /// The safety requirements of [`Collector::retire`] apply to each node in the batch.
+    /// The safety requirements of [`Collector::retire`] apply to each object in the batch.
     ///
     /// [`Collector::retire`]: crate::Collector::retire
     pub unsafe fn retire_all(&mut self, collector: &Collector, reclaim: unsafe fn(*mut Link)) {
@@ -114,7 +114,7 @@ impl Deferred {
         unsafe { collector.raw.add_batch(self, reclaim, Thread::current()) }
     }
 
-    /// Run a function for each node in the batch.
+    /// Run a function for each object in the batch.
     ///
     /// This function does not consume the batch and can be called multiple
     /// times, **before retirement**.
