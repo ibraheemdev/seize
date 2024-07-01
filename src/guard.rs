@@ -167,7 +167,7 @@ impl Guard for LocalGuard<'_> {
 
     /// Returns `true` if this guard belongs to the given collector.
     fn belongs_to(&self, collector: &Collector) -> bool {
-        Collector::ptr_eq(self.collector, collector)
+        Collector::id_eq(self.collector, collector)
     }
 }
 
@@ -274,7 +274,7 @@ impl Guard for OwnedGuard<'_> {
 
     /// Returns `true` if this guard belongs to the given collector.
     fn belongs_to(&self, collector: &Collector) -> bool {
-        Collector::ptr_eq(self.collector, collector)
+        Collector::id_eq(self.collector, collector)
     }
 }
 
