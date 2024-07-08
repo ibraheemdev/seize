@@ -2,7 +2,7 @@
 
 [![Crate](https://img.shields.io/crates/v/seize?style=for-the-badge)](https://crates.io/crates/seize)
 [![Github](https://img.shields.io/badge/github-seize-success?style=for-the-badge)](https://github.com/ibraheemdev/seize)
-[![Docs](https://img.shields.io/badge/docs.rs-0.4.2-4d76ae?style=for-the-badge)](https://docs.rs/seize)
+[![Docs](https://img.shields.io/badge/docs.rs-0.4.3-4d76ae?style=for-the-badge)](https://docs.rs/seize)
 
 Fast, efficient, and robust memory reclamation for concurrent data structures.
 
