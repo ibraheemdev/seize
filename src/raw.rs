@@ -17,7 +17,7 @@ pub struct Collector {
     // Per-thread batches of retired nodes
     batches: ThreadLocal<CachePadded<UnsafeCell<LocalBatch>>>,
     // The number of nodes allocated per-thread
-    node_count: ThreadLocal<UnsafeCell<u64>>,
+    node_count: ThreadLocal<CachePadded<UnsafeCell<u64>>>,
 
     // The global epoch value
     pub(crate) epoch: AtomicU64,
