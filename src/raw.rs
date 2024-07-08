@@ -42,20 +42,23 @@ impl Collector {
 
     // Create a new node.
     pub fn node(&self) -> Node {
-        // safety: node counts are only accessed by the current thread
-        let count = unsafe { &mut *self.node_count.load(Thread::current()).get() };
-        *count += 1;
-
         // record the current epoch value
         //
         // note that it's fine if we see older epoch values here, which just means more
         // threads will be counted as active than might actually be
         let birth_epoch = match self.epoch_frequency {
-            // advance the global epoch
-            Some(ref freq) if *count % freq.get() == 0 => {
-                self.epoch.fetch_add(1, Ordering::Relaxed) + 1
+            Some(ref epoch_frequency) => {
+                // safety: node counts are only accessed by the current thread
+                let count = unsafe { &mut *self.node_count.load(Thread::current()).get() };
+                *count += 1;
+
+                // advance the global epoch
+                if *count % epoch_frequency.get() == 0 {
+                    self.epoch.fetch_add(1, Ordering::Relaxed) + 1
+                } else {
+                    self.epoch.load(Ordering::Relaxed)
+                }
             }
-            Some(_) => self.epoch.load(Ordering::Relaxed),
             // we aren't tracking epochs
             None => 0,
         };
