@@ -41,6 +41,7 @@ impl Collector {
     }
 
     // Create a new node.
+    #[inline]
     pub fn node(&self) -> Node {
         // record the current epoch value
         //
@@ -71,6 +72,7 @@ impl Collector {
     // # Safety
     //
     // The reservation must be accessed soundly across multiple threads.
+    #[inline]
     pub unsafe fn reservation(&self, thread: Thread) -> &Reservation {
         self.reservations.load(thread)
     }
@@ -85,6 +87,7 @@ impl Collector {
     //
     // This method is not safe to call concurrently on the same thread.
     // This method must only be called if the current thread is inactive.
+    #[inline]
     pub unsafe fn enter(&self, reservation: &Reservation) {
         // mark the thread as active
         //
@@ -212,6 +215,7 @@ impl Collector {
     //
     // This method is not safe to call concurrently on the same thread.
     // Any previously protected pointers may be invalidated.
+    #[inline]
     pub unsafe fn leave(&self, reservation: &Reservation) {
         // release: exit the critical section
         let head = reservation.head.swap(Entry::INACTIVE, Ordering::Release);
@@ -232,6 +236,7 @@ impl Collector {
     //
     // This method is not safe to call concurrently on the same thread.
     // Any previously protected values may be invalidated.
+    #[inline]
     pub unsafe fn refresh(&self, reservation: &Reservation) {
         // release: exit the critical section
         // seqcst: establish the same total order as in `enter`
@@ -249,6 +254,7 @@ impl Collector {
     //
     // `ptr` must be a valid pointer that is no longer accessible to any inactive threads.
     // This method is not safe to call concurrently with the same `thread`.
+    #[inline]
     pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link), thread: Thread)
     where
         T: AsLink,
@@ -299,6 +305,7 @@ impl Collector {
     //
     // The batch must no longer accessible to any inactive threads.
     // This method is not safe to call concurrently with the same `thread`.
+    #[inline]
     pub unsafe fn add_batch(
         &self,
         deferred: &mut Deferred,
@@ -352,6 +359,7 @@ impl Collector {
     // # Safety
     //
     // This method is not safe to call concurrently with the same `thread`.
+    #[inline]
     pub unsafe fn try_retire_batch(&self, thread: Thread) {
         let local_batch = self.batches.load(thread).get();
 
@@ -367,6 +375,7 @@ impl Collector {
     // # Safety
     //
     // This method is not safe to call concurrently with the same `thread`.
+    #[inline]
     pub unsafe fn try_retire(&self, local_batch: *mut LocalBatch, thread: Thread) {
         // establish a total order between the retirement of nodes in this batch and stores
         // marking a thread as active (or active in an epoch):
@@ -527,6 +536,7 @@ impl Collector {
     // # Safety
     //
     // `list` must be a valid reservation list
+    #[inline]
     unsafe fn traverse(mut list: *mut Entry) {
         while !list.is_null() {
             let curr = list;
@@ -556,6 +566,7 @@ impl Collector {
     // # Safety
     //
     // No threads may be accessing the collector or any values that have been retired.
+    #[inline]
     pub unsafe fn reclaim_all(&self) {
         for local_batch in self.batches.iter() {
             let local_batch = local_batch.value.get();
@@ -588,6 +599,7 @@ impl Collector {
     // be holding on to any mutable references to thread-locals, as recursive calls to retire
     // may access the local batch. The batch being retired must be unreachable through any
     // recursive calls.
+    #[inline]
     unsafe fn free_batch(batch: *mut Batch) {
         // safety: we are the last reference to the batch
         for entry in unsafe { (*batch).entries.iter_mut() } {
@@ -599,6 +611,7 @@ impl Collector {
 }
 
 impl Drop for Collector {
+    #[inline]
     fn drop(&mut self) {
         // safety: we have &mut self
         unsafe { self.reclaim_all() };
@@ -661,6 +674,7 @@ struct Batch {
 
 impl Batch {
     // Create a new batch with the specified capacity.
+    #[inline]
     fn new(capacity: usize) -> Batch {
         Batch {
             entries: Vec::with_capacity(capacity),
@@ -705,6 +719,7 @@ impl LocalBatch {
     const DROP: *mut Batch = usize::MAX as _;
 
     // Return a pointer to the batch, initializing it if the batch was null.
+    #[inline]
     fn get_or_init(&mut self, capacity: usize) -> *mut Batch {
         if self.batch.is_null() {
             self.batch = Box::into_raw(Box::new(Batch::new(capacity)));
@@ -714,6 +729,7 @@ impl LocalBatch {
     }
 
     // Free the batch.
+    #[inline]
     unsafe fn free(ptr: *mut Batch) {
         unsafe { drop(Box::from_raw(ptr)) }
     }

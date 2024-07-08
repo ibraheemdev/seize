@@ -138,6 +138,7 @@ impl Collector {
     /// # unsafe { guard2.defer_retire(value, reclaim::boxed::<Linked<usize>>) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
+    #[inline]
     pub fn enter(&self) -> LocalGuard<'_> {
         LocalGuard::enter(self)
     }
@@ -148,6 +149,7 @@ impl Collector {
     /// owned guards are independent of the current thread, allowing
     /// them to implement `Send`. See the documentation of [`OwnedGuard`]
     /// for more details.
+    #[inline]
     pub fn enter_owned(&self) -> OwnedGuard<'_> {
         OwnedGuard::enter(self)
     }
@@ -157,6 +159,7 @@ impl Collector {
     /// This method is useful when working with a DST where the [`Linked`] wrapper
     /// cannot be used. See [`AsLink`] for details, or use the [`link_value`](Collector::link_value)
     /// and [`link_boxed`](Collector::link_boxed) helpers.
+    #[inline]
     pub fn link(&self) -> Link {
         Link {
             node: UnsafeCell::new(self.raw.node()),
@@ -173,6 +176,7 @@ impl Collector {
     ///     link: collector.link()
     /// }
     /// ```
+    #[inline]
     pub fn link_value<T>(&self, value: T) -> Linked<T> {
         Linked {
             link: self.link(),
@@ -190,6 +194,7 @@ impl Collector {
     ///     link: collector.link()
     /// }))
     /// ```
+    #[inline]
     pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
         Box::into_raw(Box::new(Linked {
             link: self.link(),
@@ -255,6 +260,7 @@ impl Collector {
     ///     });
     /// }
     /// ```
+    #[inline]
     pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
@@ -282,10 +288,12 @@ impl Collector {
     ///
     /// Note that if reclaimers initialize guards across threads, or initialize owned guards,
     /// objects retired through those guards may not be reclaimed.
+    #[inline]
     pub unsafe fn reclaim_all(&self) {
         unsafe { self.raw.reclaim_all() };
     }
 
+    #[inline]
     pub(crate) fn id_eq(this: &Collector, other: &Collector) -> bool {
         this.id == other.id
     }
@@ -338,6 +346,7 @@ impl Link {
     /// pointer is only sound if the link is in fact a type-erased `T`.
     /// This means that when casting a link in a reclaimer, the value
     /// that was retired must be of type `T`.
+    #[inline]
     pub fn cast<T: AsLink>(link: *mut Link) -> *mut T {
         link.cast()
     }
@@ -395,6 +404,7 @@ pub struct Linked<T> {
 unsafe impl<T> AsLink for Linked<T> {}
 
 impl<T: PartialEq> PartialEq for Linked<T> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
     }
@@ -417,12 +427,14 @@ impl<T: fmt::Display> fmt::Display for Linked<T> {
 impl<T> std::ops::Deref for Linked<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.value
     }
 }
 
 impl<T> std::ops::DerefMut for Linked<T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
     }

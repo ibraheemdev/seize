@@ -65,6 +65,7 @@ impl Thread {
     }
 
     /// Get the current thread.
+    #[inline]
     pub fn current() -> Thread {
         THREAD.with(|holder| holder.0)
     }
@@ -84,7 +85,7 @@ struct ThreadGuard(Thread);
 
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        Thread::free(self.0)
+        self.0.free();
     }
 }
 

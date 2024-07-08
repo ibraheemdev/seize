@@ -65,6 +65,7 @@ where
         }
     }
 
+    #[inline]
     pub fn load(&self, thread: Thread) -> &T
     where
         T: Default,
@@ -72,6 +73,7 @@ where
         self.load_or(T::default, thread)
     }
 
+    #[inline]
     pub fn load_or(&self, create: impl Fn() -> T, thread: Thread) -> &T {
         let bucket = unsafe { self.buckets.get_unchecked(thread.bucket) };
         let mut bucket_ptr = bucket.load(Ordering::Acquire);
@@ -148,6 +150,7 @@ where
         }
     }
 
+    #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             bucket: 0,
@@ -200,6 +203,7 @@ where
 {
     type Item = &'a T;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         // because we reuse thread IDs, a new thread could join and be inserted into the middle of the list,
         // so we have to check all the buckets here. yielding extra values is fine, but not yielding all originally
