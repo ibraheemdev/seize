@@ -1,14 +1,14 @@
-# Seize
+# `seize`
 
-[![Crate](https://img.shields.io/crates/v/seize?style=for-the-badge)](https://crates.io/crates/seize)
-[![Github](https://img.shields.io/badge/github-seize-success?style=for-the-badge)](https://github.com/ibraheemdev/seize)
-[![Docs](https://img.shields.io/badge/docs.rs-0.4.4-4d76ae?style=for-the-badge)](https://docs.rs/seize)
+[<img alt="crates.io" src="https://img.shields.io/crates/v/seize?style=for-the-badge" height="25">](https://crates.io/crates/seize)
+[<img alt="github" src="https://img.shields.io/badge/github-seize-blue?style=for-the-badge" height="25">](https://github.com/ibraheemdev/seize)
+[<img alt="docs.rs" src="https://img.shields.io/docsrs/seize?style=for-the-badge" height="25">](https://docs.rs/seize)
 
 Fast, efficient, and robust memory reclamation for concurrent data structures.
 
 See the [quick-start guide] to get started.
 
-# Background
+## Background
 
 Concurrent data structures are faced with the problem of deciding when it is
 safe to free memory. Although an object might have been logically removed, other
@@ -26,7 +26,7 @@ reclamation schemes, the thread that retires an object is the one that reclaims
 it. This leads to unbalanced reclamation in read-dominated workloads; parallelism
 is reduced when only a fraction of threads are writing, degrading memory efficiency.
 
-# Implementation
+## Implementation
 
 Seize is based on the [hyaline reclamation scheme], which uses reference counting
 to determine when it is safe to free memory. However, reference counters are only
