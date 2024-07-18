@@ -574,8 +574,8 @@ fn shared_owned_stress() {
 
 #[test]
 fn owned_stress() {
-    // all threads creating an owned guard (this is very unrealistic and stresses tls
-    // synchronization)
+    // all threads creating an owned guard (this is very unrealistic and stresses
+    // tls synchronization)
     for _ in 0..cfg::ITER {
         let stack = Arc::new(Stack::new(1));
 

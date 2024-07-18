@@ -9,15 +9,18 @@ use crate::{AsLink, Collector, Link};
 /// A batch of pointers to be reclaimed in the future.
 ///
 /// Sometimes it is necessary to defer the retirement of a batch of pointers.
-/// For example, a set of pointers may be reachable from multiple locations in a data structure
-/// and can only be retired after a specific object is reclaimed. In such cases, the [`Deferred`] type
-/// can serve as a cheap place to defer the retirement of pointers, without allocating extra memory.
+/// For example, a set of pointers may be reachable from multiple locations in a
+/// data structure and can only be retired after a specific object is reclaimed.
+/// In such cases, the [`Deferred`] type can serve as a cheap place to defer the
+/// retirement of pointers, without allocating extra memory.
 ///
-/// [`Deferred`] is a concurrent list, meaning that pointers can be added from multiple threads
-/// concurrently. It is not meant to be used to amortize the cost of retirement, which is done
-/// through thread-local batches controlled with [`Collector::batch_size`], as access from a single-thread
-/// can be more expensive than is required. Deferred batches are useful when you need to control when
-/// a batch of objects is retired directly, a relatively rare use case.
+/// [`Deferred`] is a concurrent list, meaning that pointers can be added from
+/// multiple threads concurrently. It is not meant to be used to amortize the
+/// cost of retirement, which is done through thread-local batches controlled
+/// with [`Collector::batch_size`], as access from a single-thread can be more
+/// expensive than is required. Deferred batches are useful when you need to
+/// control when a batch of objects is retired directly, a relatively rare use
+/// case.
 ///
 /// # Examples
 ///
@@ -63,30 +66,31 @@ impl Deferred {
     ///
     /// # Safety
     ///
-    /// After this method is called, it is *undefined behavior* to add this pointer to the
-    /// batch again, or any other batch. The pointer must also be valid for access as a [`Link`],
-    /// per the [`AsLink`] trait.
+    /// After this method is called, it is *undefined behavior* to add this
+    /// pointer to the batch again, or any other batch. The pointer must
+    /// also be valid for access as a [`Link`], per the [`AsLink`] trait.
     pub unsafe fn defer<T: AsLink>(&self, ptr: *mut T) {
-        // `ptr` is guaranteed to be a valid pointer that can be cast to a node (`T: AsLink`)
+        // `ptr` is guaranteed to be a valid pointer that can be cast to a node
+        // (because of `T: AsLink`).
         //
-        // any other thread with a reference to the pointer only has a shared
-        // reference to the UnsafeCell<Node>, which is allowed to alias. the caller
-        // guarantees that the same pointer is not deferred twice, so we can safely read/write
-        // to the node through this pointer.
+        // Any other thread with a reference to the pointer only has a shared reference
+        // to the `UnsafeCell<Node>`, which is allowed to alias. The caller guarantees
+        // that the same pointer is not retired twice, so we can safely write to the
+        // node through the shared pointer.
         let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
 
         let birth_epoch = unsafe { (*node).birth_epoch };
 
-        // keep track of the oldest node in the batch
+        // Keep track of the oldest node in the batch.
         self.min_epoch.fetch_min(birth_epoch, Ordering::Relaxed);
 
-        // relaxed: we never access head
+        // Relaxed: `self.head` is only ever accessed through a mutable reference.
         let mut prev = self.head.load(Ordering::Relaxed);
 
         loop {
             unsafe { (*node).next_batch = prev }
 
-            // relaxed: head is only ever accessed through a mutable reference
+            // Relaxed: `self.head` is only ever accessed through a mutable reference.
             match self
                 .head
                 .compare_exchange_weak(prev, node, Ordering::Relaxed, Ordering::Relaxed)
@@ -97,20 +101,21 @@ impl Deferred {
         }
     }
 
-    /// Retires a batch of values, running `reclaim` when no threads hold a reference to any
-    /// objects in the batch.
+    /// Retires a batch of values, running `reclaim` when no threads hold a
+    /// reference to any objects in the batch.
     ///
-    /// Note that this method is disconnected from any guards on the current thread,
-    /// so the pointers may be reclaimed immediately.
+    /// Note that this method is disconnected from any guards on the current
+    /// thread, so the pointers may be reclaimed immediately.
     ///
     /// # Safety
     ///
-    /// The safety requirements of [`Collector::retire`] apply to each object in the batch.
+    /// The safety requirements of [`Collector::retire`] apply to each object in
+    /// the batch.
     ///
     /// [`Collector::retire`]: crate::Collector::retire
     pub unsafe fn retire_all(&mut self, collector: &Collector, reclaim: unsafe fn(*mut Link)) {
-        // note that `add_batch` doesn't ever actually reclaim the pointer immediately if
-        // the current thread is active, similar to `retire`.
+        // Note that `add_batch` doesn't ever actually reclaim the pointer immediately
+        // if the current thread is active, similar to `retire`.
         unsafe { collector.raw.add_batch(self, reclaim, Thread::current()) }
     }
 
@@ -124,7 +129,8 @@ impl Deferred {
         while !list.is_null() {
             let curr = list;
 
-            // safety: `curr` is a valid non-null node in the list
+            // Advance the cursor.
+            // Safety: `curr` is a valid, non-null node in the list.
             list = unsafe { (*curr).next_batch };
 
             f(curr);

@@ -94,11 +94,12 @@ impl Collector {
     ///
     /// # Performance
     ///
-    /// Creating and destroying a guard is about the same as locking and unlocking
-    /// an uncontended `Mutex`, performance-wise. Because of this, guards should
-    /// be re-used across multiple operations if possible. However, note that holding
-    /// a guard prevents the reclamation of any concurrent objects retired during
-    /// it's lifetime, so there is a tradeoff between performance and memory usage.
+    /// Creating and destroying a guard is about the same as locking and
+    /// unlocking an uncontended `Mutex`, performance-wise. Because of this,
+    /// guards should be re-used across multiple operations if possible.
+    /// However, note that holding a guard prevents the reclamation of any
+    /// concurrent objects retired during it's lifetime, so there is a
+    /// tradeoff between performance and memory usage.
     ///
     /// # Examples
     ///
@@ -156,8 +157,9 @@ impl Collector {
 
     /// Create a [`Link`] that can be used to link an object to the collector.
     ///
-    /// This method is useful when working with a DST where the [`Linked`] wrapper
-    /// cannot be used. See [`AsLink`] for details, or use the [`link_value`](Collector::link_value)
+    /// This method is useful when working with a DST where the [`Linked`]
+    /// wrapper cannot be used. See [`AsLink`] for details, or use the
+    /// [`link_value`](Collector::link_value)
     /// and [`link_boxed`](Collector::link_boxed) helpers.
     #[inline]
     pub fn link(&self) -> Link {
@@ -202,27 +204,31 @@ impl Collector {
         }))
     }
 
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    /// Retires a value, running `reclaim` when no threads hold a reference to
+    /// it.
     ///
-    /// Note that this method is disconnected from any guards on the current thread,
-    /// so the pointer may be reclaimed immediately. Use [`Guard::defer_retire`](crate::Guard::defer_retire)
-    /// if the pointer may still be accessed by the current thread.
+    /// Note that this method is disconnected from any guards on the current
+    /// thread, so the pointer may be reclaimed immediately. Use
+    /// [`Guard::defer_retire`](crate::Guard::defer_retire) if the pointer
+    /// may still be accessed by the current thread.
     ///
     /// # Safety
     ///
-    /// The retired object must no longer be accessible to any thread that enters
-    /// after it is removed. It also cannot be accessed by the current thread
-    /// after `retire` is called.
+    /// The retired object must no longer be accessible to any thread that
+    /// enters after it is removed. It also cannot be accessed by the
+    /// current thread after `retire` is called.
     ///
-    /// Retiring the same pointer twice can cause **undefined behavior**, even if the
-    /// reclaimer doesn't free memory.
+    /// Retiring the same pointer twice can cause **undefined behavior**, even
+    /// if the reclaimer doesn't free memory.
     ///
-    /// Additionally, the pointer must be valid to access as a [`Link`], per the [`AsLink`]
-    /// trait, and the reclaimer passed to `retire` must correctly free values of type `T`.
+    /// Additionally, the pointer must be valid to access as a [`Link`], per the
+    /// [`AsLink`] trait, and the reclaimer passed to `retire` must
+    /// correctly free values of type `T`.
     ///
     /// # Examples
     ///
-    /// Common reclaimers are provided by the [`reclaim`](crate::reclaim) module.
+    /// Common reclaimers are provided by the [`reclaim`](crate::reclaim)
+    /// module.
     ///
     /// ```
     /// # use std::sync::atomic::{AtomicPtr, Ordering};
@@ -264,31 +270,33 @@ impl Collector {
     pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
-        // note that `add` doesn't ever actually reclaim the pointer immediately if
-        // the current thread is active, it instead adds it to it's reclamation list,
-        // but we don't guarantee that publicly.
+        // Note that `add` doesn't ever actually reclaim the pointer immediately if
+        // the current thread is active. Instead, it adds it to the current thread's
+        // reclamation list, but we don't guarantee that publicly.
         unsafe { self.raw.add(ptr, reclaim, Thread::current()) }
     }
 
     /// Reclaim any values that have been retired.
     ///
-    /// This method reclaims any objects that have been retired across *all* threads.
-    /// After calling this method, any values that were previous retired, or retired
-    /// recursively on the current thread during this call, will have been reclaimed.
+    /// This method reclaims any objects that have been retired across *all*
+    /// threads. After calling this method, any values that were previous
+    /// retired, or retired recursively on the current thread during this
+    /// call, will have been reclaimed.
     ///
     /// # Safety
     ///
-    /// This function is **extremely unsafe** to call. It is only sound when no threads are
-    /// currently active, whether accessing values that have been retired or accessing the
-    /// collector through any type of guard. This is akin to having a unique reference to the
-    /// collector. However, this method takes a shared reference, as reclaimers to be run by this
+    /// This function is **extremely unsafe** to call. It is only sound when no
+    /// threads are currently active, whether accessing values that have
+    /// been retired or accessing the collector through any type of guard.
+    /// This is akin to having a unique reference to the collector. However,
+    /// this method takes a shared reference, as reclaimers to be run by this
     /// thread are allowed to access the collector recursively.
     ///
     /// # Notes
     ///
-    /// Note that if reclaimers initialize guards across threads, or initialize owned guards,
-    /// objects retired through those guards may not be reclaimed.
-    #[inline]
+    /// Note that if reclaimers initialize guards across threads, or initialize
+    /// owned guards, objects retired through those guards may not be
+    /// reclaimed.
     pub unsafe fn reclaim_all(&self) {
         unsafe { self.raw.reclaim_all() };
     }
@@ -300,7 +308,8 @@ impl Collector {
 }
 
 impl Clone for Collector {
-    /// Creates a new, independent collector with the same configuration as this one.
+    /// Creates a new, independent collector with the same configuration as this
+    /// one.
     fn clone(&self) -> Self {
         Collector::new()
             .batch_size(self.raw.batch_size)
@@ -330,8 +339,8 @@ impl fmt::Debug for Collector {
 
 /// A link to the collector.
 ///
-/// Functions passed to [`retire`](Collector::retire) are called with a type-erased
-/// `Link` pointer. To extract the underlying value from a link,
+/// Functions passed to [`retire`](Collector::retire) are called with a
+/// type-erased `Link` pointer. To extract the underlying value from a link,
 /// you can call the [`cast`](Link::cast) method.
 #[repr(transparent)]
 pub struct Link {
@@ -392,9 +401,9 @@ pub unsafe trait AsLink {}
 
 /// A value linked to a collector.
 ///
-/// Objects that may be retired must embed the [`Link`] type. This is a convenience wrapper
-/// for linked values that can be created with the [`Collector::link_value`] or
-/// [`Collector::link_boxed`] methods.
+/// Objects that may be retired must embed the [`Link`] type. This is a
+/// convenience wrapper for linked values that can be created with the
+/// [`Collector::link_value`] or [`Collector::link_boxed`] methods.
 #[repr(C)]
 pub struct Linked<T> {
     pub link: Link, // Safety Invariant: this field must come first

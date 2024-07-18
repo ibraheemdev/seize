@@ -10,7 +10,8 @@ use crate::{AsLink, Collector, Link};
 /// This trait provides common functionality implemented by [`LocalGuard`],
 /// [`OwnedGuard`], and [`UnprotectedGuard`].
 ///
-/// See [the guide](crate::guide#starting-operations) for an introduction to using guards.
+/// See [the guide](crate::guide#starting-operations) for an introduction to
+/// using guards.
 pub trait Guard {
     /// Refreshes the guard.
     ///
@@ -40,19 +41,21 @@ pub trait Guard {
 
     /// Protects the load of an atomic pointer.
     ///
-    /// Any valid pointer loaded through a guard using the `protect` method is guaranteed
-    /// to stay valid until the guard is dropped, or the object is retired by the current
-    /// thread. Importantly, if another thread retires this object, it will not be reclaimed
-    /// for the lifetime of this guard.
+    /// Any valid pointer loaded through a guard using the `protect` method is
+    /// guaranteed to stay valid until the guard is dropped, or the object
+    /// is retired by the current thread. Importantly, if another thread
+    /// retires this object, it will not be reclaimed for the lifetime of
+    /// this guard.
     ///
-    /// Note that the lifetime of a guarded pointer is logically tied to that of the
-    /// guard -- when the guard is dropped the pointer is invalidated -- but a raw
-    /// pointer is returned for convenience. Data structures that return shared references
-    /// to values should ensure that the lifetime of the reference is tied to the lifetime
-    /// of a guard.
+    /// Note that the lifetime of a guarded pointer is logically tied to that of
+    /// the guard -- when the guard is dropped the pointer is invalidated --
+    /// but a raw pointer is returned for convenience. Data structures that
+    /// return shared references to values should ensure that the lifetime
+    /// of the reference is tied to the lifetime of a guard.
     fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T;
 
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    /// Retires a value, running `reclaim` when no threads hold a reference to
+    /// it.
     ///
     /// This method delays reclamation until the guard is dropped as opposed to
     /// [`Collector::retire`], which may reclaim objects immediately.
@@ -60,22 +63,24 @@ pub trait Guard {
     ///
     /// # Safety
     ///
-    /// The retired object must no longer be accessible to any thread that enters
-    /// after it is removed.
+    /// The retired object must no longer be accessible to any thread that
+    /// enters after it is removed.
     ///
-    /// Retiring the same pointer twice can cause **undefined behavior**, even if the
-    /// reclaimer doesn't free memory.
+    /// Retiring the same pointer twice can cause **undefined behavior**, even
+    /// if the reclaimer doesn't free memory.
     ///
-    /// Additionally, the pointer must be valid to access as a [`Link`], per the [`AsLink`] trait,
-    /// and the reclaimer passed to `retire` must correctly free values of type `T`.
+    /// Additionally, the pointer must be valid to access as a [`Link`], per the
+    /// [`AsLink`] trait, and the reclaimer passed to `retire` must
+    /// correctly free values of type `T`.
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
 
     /// Returns a numeric identifier for the current thread.
     ///
     /// Guards rely on thread-local state, including thread IDs. If you already
     /// have a guard you can use this method to get a cheap identifier for the
-    /// current thread, avoiding TLS overhead. Note that thread IDs may be reused,
-    /// so the value returned is only unique for the lifetime of this thread.
+    /// current thread, avoiding TLS overhead. Note that thread IDs may be
+    /// reused, so the value returned is only unique for the lifetime of
+    /// this thread.
     fn thread_id(&self) -> usize;
 
     /// Returns `true` if this guard belongs to the given collector.
@@ -87,17 +92,19 @@ pub trait Guard {
 
 /// A guard that keeps the current thread marked as active.
 ///
-/// Local guards are created by calling [`Collector::enter`]. Unlike [`OwnedGuard`],
-/// a local guard is tied to the current thread and does not implement `Send`. This
-/// makes local guards relatively cheap to create and destroy.
+/// Local guards are created by calling [`Collector::enter`]. Unlike
+/// [`OwnedGuard`], a local guard is tied to the current thread and does not
+/// implement `Send`. This makes local guards relatively cheap to create and
+/// destroy.
 ///
-/// Most of the functionality provided by this type is through the [`Guard`] trait.
+/// Most of the functionality provided by this type is through the [`Guard`]
+/// trait.
 pub struct LocalGuard<'a> {
     collector: &'a Collector,
-    // the current thread
+    // The current thread.
     thread: Thread,
-    // must not be Send or Sync as we are tied to the current threads state in
-    // the collector
+    // `LocalGuard` not be `Send or Sync` as we are tied to the state of the
+    // current thread in the collector.
     _unsend: PhantomData<*mut ()>,
 }
 
@@ -105,16 +112,16 @@ impl LocalGuard<'_> {
     #[inline]
     pub(crate) fn enter(collector: &Collector) -> LocalGuard<'_> {
         let thread = Thread::current();
-        // safety: `thread` is the current thread
+        // Safety: `thread` is the current thread.
         let reservation = unsafe { collector.raw.reservation(thread) };
 
-        // calls to `enter` may be reentrant, so we need to keep track of the number
-        // of active guards for the current thread
+        // Calls to `enter` may be reentrant, so we need to keep track of the number
+        // of active guards for the current thread.
         let guards = reservation.guards.get();
         reservation.guards.set(guards + 1);
 
         if guards == 0 {
-            // safety: only called on the current thread which is currently inactive
+            // Safety: Only called on the current thread, which is currently inactive.
             unsafe { collector.raw.enter(reservation) };
         }
 
@@ -130,27 +137,29 @@ impl Guard for LocalGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
     fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
-        // safety: self.thread is the current thread
+        // Safety: `self.thread` is the current thread.
         unsafe { self.collector.raw.protect_local(ptr, ordering, self.thread) }
     }
 
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    /// Retires a value, running `reclaim` when no threads hold a reference to
+    /// it.
     #[inline]
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
-        // safety: - self.thread is the current thread
-        //         - the validity of the pointer is guaranteed by the caller
+        // Safety:
+        // - `self.thread` is the current thread.
+        // - The validity of the pointer is guaranteed by the caller.
         unsafe { self.collector.raw.add(ptr, reclaim, self.thread) }
     }
 
     /// Refreshes the guard.
     #[inline]
     fn refresh(&mut self) {
-        // safety: self.thread is the current thread
+        // Safety: `self.thread` is the current thread.
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
         let guards = reservation.guards.get();
 
         if guards == 1 {
-            // safety: we have a unique reference to the last active guard
+            // Safety: We have a unique reference to the last active guard.
             unsafe { self.collector.raw.refresh(reservation) }
         }
     }
@@ -158,9 +167,10 @@ impl Guard for LocalGuard<'_> {
     /// Flush any retired values in the local batch.
     #[inline]
     fn flush(&self) {
-        // note that this does not actually retire any values, it just attempts
-        // to add the batch to any active reservations lists (including ours)
-        // safety: self.thread is the current thread
+        // Note that this does not actually retire any values, it just attempts
+        // to add the batch to any active reservations lists, including ours.
+        //
+        // Safety: `self.thread` is the current thread.
         unsafe { self.collector.raw.try_retire_batch(self.thread) }
     }
 
@@ -180,15 +190,15 @@ impl Guard for LocalGuard<'_> {
 impl Drop for LocalGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        // safety: self.thread is the current thread
+        // Safety: `self.thread` is the current thread.
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
 
-        // decrement the active guard count
+        // Decrement the active guard count.
         let guards = reservation.guards.get();
         reservation.guards.set(guards - 1);
 
         if guards == 1 {
-            // safety: we have a unique reference to the last active guard
+            // Safety: We have a unique reference to the last active guard.
             unsafe { self.collector.raw.leave(reservation) };
         }
     }
@@ -204,29 +214,32 @@ impl fmt::Debug for LocalGuard<'_> {
 /// thread.
 ///
 /// Unlike [`LocalGuard`], an owned guard is independent of the current thread,
-/// allowing them to implement `Send`. This is useful for holding guards across `.await`
-/// points in work-stealing schedulers, where execution may be resumed on a different
-/// thread than started on. However, owned guards are more expensive to create and
-/// destroy, so should be avoided if cross-thread usage is not required.
+/// allowing them to implement `Send`. This is useful for holding guards across
+/// `.await` points in work-stealing schedulers, where execution may be resumed
+/// on a different thread than started on. However, owned guards are more
+/// expensive to create and destroy, so should be avoided if cross-thread usage
+/// is not required.
 ///
-/// Most of the functionality provided by this type is through the [`Guard`] trait.
+/// Most of the functionality provided by this type is through the [`Guard`]
+/// trait.
 pub struct OwnedGuard<'a> {
     collector: &'a Collector,
-    // an owned thread
+    // An owned thread, unique to this guard.
     thread: Thread,
 }
 
-// safety: `OwnedGuard` owns its thread slot, so is not tied to any thread-locals
+// Safety: `OwnedGuard` owns its thread slot, so is not tied to any
+// thread-locals
 unsafe impl Send for OwnedGuard<'_> {}
 unsafe impl Sync for OwnedGuard<'_> {}
 
 impl OwnedGuard<'_> {
     #[inline]
     pub(crate) fn enter(collector: &Collector) -> OwnedGuard<'_> {
-        // create a thread slot that will last for the lifetime of this guard
+        // Create a thread slot that will last for the lifetime of this guard.
         let thread = Thread::create();
 
-        // safety: we have ownership of `thread`
+        // Safety: We have ownership of `thread`.
         unsafe { collector.raw.enter(collector.raw.reservation(thread)) };
 
         OwnedGuard { collector, thread }
@@ -240,21 +253,24 @@ impl Guard for OwnedGuard<'_> {
         self.collector.raw.protect(ptr, ordering, self.thread)
     }
 
-    /// Retires a value, running `reclaim` when no threads hold a reference to it.
+    /// Retires a value, running `reclaim` when no threads hold a reference to
+    /// it.
     #[inline]
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
-        // safety: we only access the reservation with the lock
+        // Safety: We only access the reservation through the lock.
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
         let _lock = reservation.lock.lock().unwrap();
-        // safety: - we hold the lock and so have unique access to the batch
-        //         - the validity of the pointer is guaranteed by the caller
+
+        // Safety:
+        // - We hold the lock and so have unique access to the batch.
+        // - The validity of the pointer is guaranteed by the caller.
         unsafe { self.collector.raw.add(ptr, reclaim, self.thread) }
     }
 
     /// Refreshes the guard.
     #[inline]
     fn refresh(&mut self) {
-        // safety: we have &mut self and ownership of the thread
+        // Safety: We have `&mut self` and ownership of the thread.
         unsafe {
             self.collector
                 .raw
@@ -265,21 +281,22 @@ impl Guard for OwnedGuard<'_> {
     /// Flush any retired values in the local batch.
     #[inline]
     fn flush(&self) {
-        // safety: we only access the reservation with the lock
+        // Safety: We only access the reservation with the lock.
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
         let _lock = reservation.lock.lock().unwrap();
-        // note that this does not actually retire any values, it just attempts
-        // to add the batch to any active reservations lists (including ours)
-        // safety: we hold the lock and so have unique access to the batch
+        // Note that this does not actually retire any values, it just attempts
+        // to add the batch to any active reservations lists, including ours.
+        //
+        // Safety: We hold the lock and so have unique access to the batch.
         unsafe { self.collector.raw.try_retire_batch(self.thread) }
     }
 
     /// Returns a numeric identifier for the current thread.
     #[inline]
     fn thread_id(&self) -> usize {
-        // we can't return the ID of our thread slot because `OwnedGuard`
+        // We can't return the ID of our thread slot because `OwnedGuard`
         // is `Send` so the ID is not uniquely tied to the current thread.
-        // we also can't return the OS thread ID because it might conflict
+        // We also can't return the OS thread ID because it might conflict
         // with our thread IDs, so we have to get/create the current thread.
         Thread::current().id
     }
@@ -294,13 +311,13 @@ impl Guard for OwnedGuard<'_> {
 impl Drop for OwnedGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        // safety: we have ownership of `thread`
+        // Safety: We have ownership of `thread`.
         let reservation = unsafe { self.collector.raw.reservation(self.thread) };
 
-        // safety: self.thread is an owned thread
+        // Safety: `self.thread` is an owned thread.
         unsafe { self.collector.raw.leave(reservation) };
 
-        // we are now inactive and can free the thread slot
+        // We are now inactive and can free the thread slot.
         self.thread.free();
     }
 }
@@ -358,7 +375,8 @@ impl Guard for UnprotectedGuard {
         Thread::current().id
     }
 
-    /// Unprotected guards aren't tied to a specific collector, so this always returns `true`.
+    /// Unprotected guards aren't tied to a specific collector, so this always
+    /// returns `true`.
     #[inline]
     fn belongs_to(&self, _collector: &Collector) -> bool {
         true

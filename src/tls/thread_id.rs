@@ -10,7 +10,7 @@ use std::collections::BinaryHeap;
 use std::sync::{Mutex, OnceLock};
 
 /// Thread ID manager which allocates thread IDs. It attempts to aggressively
-/// reuse thread IDs where possible to avoid cases where a ThreadLocal grows
+/// reuse thread IDs where possible to avoid cases where a `ThreadLocal` grows
 /// indefinitely when it is used by many short-lived threads.
 #[derive(Default)]
 struct ThreadIdManager {
@@ -19,6 +19,7 @@ struct ThreadIdManager {
 }
 
 impl ThreadIdManager {
+    /// Allocate a new thread ID.
     fn alloc(&mut self) -> usize {
         if let Some(id) = self.free_list.pop() {
             id.0
@@ -32,6 +33,7 @@ impl ThreadIdManager {
         }
     }
 
+    /// Free a thread ID for reuse.
     fn free(&mut self, id: usize) {
         self.free_list.push(Reverse(id));
     }
@@ -70,14 +72,20 @@ impl Thread {
         THREAD.with(|holder| holder.0)
     }
 
-    /// Get the current thread.
+    /// Create a new thread.
     pub fn create() -> Thread {
         Thread::new(thread_id_manager().lock().unwrap().alloc())
     }
 
+    /// Free the given thread.
     pub fn free(self) {
         thread_id_manager().lock().unwrap().free(self.id);
     }
+}
+
+thread_local! {
+    /// The current thread.
+    static THREAD: ThreadGuard = ThreadGuard(Thread::create());
 }
 
 /// Wrapper around `Thread` that allocates and deallocates the ID.
@@ -88,8 +96,6 @@ impl Drop for ThreadGuard {
         self.0.free();
     }
 }
-
-thread_local!(static THREAD: ThreadGuard = ThreadGuard(Thread::create()));
 
 #[test]
 fn test_thread() {

@@ -16,24 +16,16 @@ pub use thread_id::Thread;
 
 const BUCKETS: usize = (usize::BITS + 1) as usize;
 
+// Per-object thread local storage.
 pub struct ThreadLocal<T: Send> {
-    buckets: [AtomicPtr<Entry<T>>; BUCKETS],
+    /// The number of threads with active TLS slots.
     pub threads: AtomicUsize,
+    buckets: [AtomicPtr<Entry<T>>; BUCKETS],
 }
 
 struct Entry<T> {
     present: AtomicBool,
     value: UnsafeCell<MaybeUninit<T>>,
-}
-
-impl<T> Drop for Entry<T> {
-    fn drop(&mut self) {
-        unsafe {
-            if *self.present.get_mut() {
-                ptr::drop_in_place((*self.value.get()).as_mut_ptr());
-            }
-        }
-    }
 }
 
 unsafe impl<T: Send> Sync for ThreadLocal<T> {}
@@ -42,6 +34,7 @@ impl<T> ThreadLocal<T>
 where
     T: Send,
 {
+    /// Create a `ThreadLocal` container with the given initial capacity.
     pub fn with_capacity(capacity: usize) -> ThreadLocal<T> {
         let allocated_buckets = capacity
             .checked_sub(1)
@@ -59,12 +52,14 @@ where
         }
 
         ThreadLocal {
-            // safety: `AtomicPtr` has the same representation as a pointer
+            // Safety: `AtomicPtr` has the same representation as a pointer.
             buckets: unsafe { mem::transmute(buckets) },
             threads: AtomicUsize::new(0),
         }
     }
 
+    /// Load the slot for the given `thread`, initializing it with a default
+    /// value if necessary.
     #[inline]
     pub fn load(&self, thread: Thread) -> &T
     where
@@ -73,6 +68,8 @@ where
         self.load_or(T::default, thread)
     }
 
+    /// Load the slot for the given `thread`, initializing it using the provided
+    /// function if necessary.
     #[inline]
     pub fn load_or(&self, create: impl Fn() -> T, thread: Thread) -> &T {
         let bucket = unsafe { self.buckets.get_unchecked(thread.bucket) };
@@ -88,9 +85,9 @@ where
                 Ordering::Acquire,
             ) {
                 Ok(_) => bucket_ptr = new_bucket,
-                // if the bucket value changed (from null), that means
+                // If the bucket value changed (from null), that means
                 // another thread stored a new bucket before we could,
-                // and we can free our bucket and use that one instead
+                // and we can free our bucket and use that one instead.
                 Err(other) => unsafe {
                     let _ = Box::from_raw(ptr::slice_from_raw_parts_mut(
                         new_bucket,
@@ -105,23 +102,23 @@ where
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
 
-            // relaxed: only this thread can set the value
+            // Relaxed: Only the current thread can set the value.
             if entry.present.load(Ordering::Relaxed) {
                 (*entry.value.get()).assume_init_ref()
             } else {
-                // insert the new element into the bucket
+                // Insert the new element into the bucket.
                 entry.value.get().write(MaybeUninit::new(create()));
 
-                // release: necessary for iterator
+                // Release: Necessary for iterators.
                 entry.present.store(true, Ordering::Release);
 
                 self.threads.fetch_add(1, Ordering::Relaxed);
 
-                // seqcst: synchronize with the fence in `retire`:
-                // - if this fence comes first, the thread retiring will see the new thread count
-                //   and our entry
-                // - if their fence comes first, we will see the new values of any pointers being
-                //   retired by that thread
+                // SeqCst: Synchronize with the fence in `retire`:
+                // - If this fence comes first, the thread retiring will see the new thread
+                //   count and our entry.
+                // - If their fence comes first, we will see the new values of any pointers
+                //   being retired by that thread.
                 atomic::fence(Ordering::SeqCst);
 
                 (*entry.value.get()).assume_init_ref()
@@ -129,6 +126,7 @@ where
         }
     }
 
+    /// Load the
     #[cfg(test)]
     fn try_load(&self) -> Option<&T> {
         let thread = Thread::current();
@@ -141,7 +139,7 @@ where
 
         unsafe {
             let entry = &*bucket_ptr.add(thread.index);
-            // read without atomic operations as only this thread can set the value.
+            // Relaxed: Only the current thread can set the value.
             if entry.present.load(Ordering::Relaxed) {
                 Some((*entry.value.get()).assume_init_ref())
             } else {
@@ -150,6 +148,7 @@ where
         }
     }
 
+    /// Returns an iterator over all active thread slots.
     #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
@@ -187,6 +186,17 @@ where
     }
 }
 
+impl<T> Drop for Entry<T> {
+    fn drop(&mut self) {
+        unsafe {
+            if *self.present.get_mut() {
+                ptr::drop_in_place((*self.value.get()).as_mut_ptr());
+            }
+        }
+    }
+}
+
+/// An iterator over a `ThreadLocal`.
 pub struct Iter<'a, T>
 where
     T: Send,
@@ -205,9 +215,10 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        // because we reuse thread IDs, a new thread could join and be inserted into the middle of the list,
-        // so we have to check all the buckets here. yielding extra values is fine, but not yielding all originally
-        // active threads is not
+        // Because we reuse thread IDs, a new thread could join and be inserted into the
+        // middle of the list, meaning we have to check all the buckets here. Yielding
+        // extra values is fine, but not yielding all originally active threads
+        // is not.
         while self.bucket < BUCKETS {
             let bucket = unsafe {
                 self.thread_local
@@ -238,15 +249,16 @@ where
     }
 }
 
+/// Allocate a bucket of the given size.
 fn allocate_bucket<T>(size: usize) -> *mut Entry<T> {
-    Box::into_raw(
-        (0..size)
-            .map(|_| Entry::<T> {
-                present: AtomicBool::new(false),
-                value: UnsafeCell::new(MaybeUninit::uninit()),
-            })
-            .collect(),
-    ) as *mut _
+    let entries = (0..size)
+        .map(|_| Entry::<T> {
+            present: AtomicBool::new(false),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+        })
+        .collect::<Box<[Entry<T>]>>();
+
+    Box::into_raw(entries) as *mut _
 }
 
 #[cfg(test)]
