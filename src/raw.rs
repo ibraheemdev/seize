@@ -171,8 +171,8 @@ impl Collector {
 
         // load the last epoch we recorded
         //
-        // acquire the global epoch if this was modified by another thread
-        let mut prev_epoch = reservation.epoch.load(Ordering::Acquire);
+        // SeqCst: participate in the total order if this was modified by another thread
+        let mut prev_epoch = reservation.epoch.load(Ordering::SeqCst);
 
         loop {
             // seqcst:
@@ -200,7 +200,7 @@ impl Collector {
             // - if the fence comes first, we will see the new values of any objects being
             //   retired by that thread (all pointer loads are also seqcst and thus participate
             //   in the total order)
-            // we also acquire the global epoch if the local epoch is concurrently modified
+            // we also participate in the total order if the local epoch is concurrently modified
             // by another thread
             prev_epoch = reservation
                 .epoch
