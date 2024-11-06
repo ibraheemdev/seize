@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::{Mutex, OnceLock};
@@ -69,7 +70,22 @@ impl Thread {
     /// Get the current thread.
     #[inline]
     pub fn current() -> Thread {
-        THREAD.with(|holder| holder.0)
+        THREAD.with(|thread| {
+            if let Some(thread) = thread.get() {
+                thread
+            } else {
+                Thread::init_slow(thread)
+            }
+        })
+    }
+
+    /// Slow path for allocating a thread ID.
+    #[cold]
+    fn init_slow(thread: &Cell<Option<Thread>>) -> Thread {
+        let new = Thread::create();
+        thread.set(Some(new));
+        THREAD_GUARD.with(|guard| guard.id.set(new.id));
+        new
     }
 
     /// Create a new thread.
@@ -82,23 +98,35 @@ impl Thread {
     /// # Safety
     ///
     /// This function must only be called once on a given thread.
-    pub unsafe fn free(self) {
-        thread_id_manager().lock().unwrap().free(self.id);
+    pub unsafe fn free(id: usize) {
+        thread_id_manager().lock().unwrap().free(id);
     }
 }
 
-thread_local! {
-    /// The current thread.
-    static THREAD: ThreadGuard = ThreadGuard(Thread::create());
-}
+// This is split into 2 thread-local variables so that we can check whether the
+// thread is initialized without having to register a thread-local destructor.
+//
+// This makes the fast path smaller.
+thread_local! { static THREAD: Cell<Option<Thread>> = const { Cell::new(None) }; }
+thread_local! { static THREAD_GUARD: ThreadGuard = const { ThreadGuard { id: Cell::new(0) } }; }
 
-/// Wrapper around `Thread` that allocates and deallocates the ID.
-struct ThreadGuard(Thread);
+// Guard to ensure the thread ID is released on thread exit.
+struct ThreadGuard {
+    // We keep a copy of the thread ID in the `ThreadGuard`: we can't
+    // reliably access `THREAD` in our `Drop` impl due to the unpredictable
+    // order of TLS destructors.
+    id: Cell<usize>,
+}
 
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        // Safety: We are in `drop` and never copy the `ThreadGuard`.
-        unsafe { self.0.free() };
+        // Release the thread ID. Any further accesses to the thread ID
+        // will go through get_slow which will either panic or
+        // initialize a new ThreadGuard.
+        let _ = THREAD.try_with(|thread| thread.set(None));
+
+        // Safety: We are in `drop` and the current thread uniquely owns this ID.
+        unsafe { Thread::free(self.id.get()) };
     }
 }
 

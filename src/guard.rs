@@ -337,7 +337,7 @@ impl Drop for OwnedGuard<'_> {
         unsafe { self.collector.raw.leave(reservation) };
 
         // Safety: We are in `drop` and never share `self.thread`.
-        unsafe { self.thread.free() };
+        unsafe { Thread::free(self.thread.id) };
     }
 }
 
