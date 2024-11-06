@@ -127,7 +127,14 @@ impl Collector {
         //
         // Note that all pointer loads must also be SeqCst and thus participate in this
         // total order.
+        #[cfg(not(feature = "fast-barrier"))]
         reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
+
+        #[cfg(feature = "fast-barrier")]
+        {
+            reservation.head.store(ptr::null_mut(), Ordering::Relaxed);
+            membarrier::light();
+        }
     }
 
     /// Load an atomic pointer.
@@ -447,7 +454,12 @@ impl Collector {
         // - If our fence comes first, they will see the new values of any objects in
         //   this batch.
         // - If their fence comes first, we will see the new thread.
+        #[cfg(not(feature = "fast-barrier"))]
         atomic::fence(Ordering::SeqCst);
+
+        // Synchronize with the light barrier in `enter`, similar to above.
+        #[cfg(feature = "fast-barrier")]
+        membarrier::heavy();
 
         // Safety: Local batches are only accessed by the current thread.
         let batch = unsafe { (*local_batch).batch };

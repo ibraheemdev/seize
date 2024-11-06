@@ -10,6 +10,11 @@ keywords = ["lock-free", "atomic", "garbage"]
 categories = ["concurrency", "memory-management"]
 
 [dependencies]
+membarrier = { path = "../../membarrier-rs", optional = true }
+
+[features]
+# Enables fast memory barriers that reduce the overhead of creating guards.
+fast-barrier = ["membarrier"]
 
 [dev-dependencies]
 criterion = "0.3.5"
