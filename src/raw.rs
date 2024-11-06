@@ -134,13 +134,13 @@ impl Collector {
     ///
     /// # Safety
     ///
-    /// This method must only ever be called from a single thread.
+    /// This method must only be called with the reservation of the current thread.
     #[inline]
     pub unsafe fn protect_local<T>(
         &self,
         ptr: &AtomicPtr<T>,
         _ordering: Ordering,
-        thread: Thread,
+        reservation: &Reservation,
     ) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
@@ -149,8 +149,6 @@ impl Collector {
             // total order. See `enter` for details.
             return ptr.load(Ordering::SeqCst);
         }
-
-        let reservation = self.reservations.load(thread);
 
         // Load the last epoch we recorded on this thread.
         //
@@ -195,7 +193,12 @@ impl Collector {
     /// This method is safe to call concurrently from multiple threads with the
     /// same `thread` object.
     #[inline]
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, _ordering: Ordering, thread: Thread) -> *mut T {
+    pub fn protect<T>(
+        &self,
+        ptr: &AtomicPtr<T>,
+        _ordering: Ordering,
+        reservation: &Reservation,
+    ) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
             //
@@ -203,8 +206,6 @@ impl Collector {
             // total order. See `enter` for details.
             return ptr.load(Ordering::SeqCst);
         }
-
-        let reservation = self.reservations.load(thread);
 
         // Load the last epoch we recorded for this reservation.
         //
