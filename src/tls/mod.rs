@@ -8,9 +8,9 @@
 mod thread_id;
 
 use std::cell::UnsafeCell;
-use std::mem::{self, MaybeUninit};
-use std::ptr;
-use std::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{self, AtomicBool, AtomicPtr, Ordering};
+use std::{mem, ptr};
 
 pub use thread_id::Thread;
 
@@ -22,8 +22,6 @@ const BUCKETS: usize = (usize::BITS as usize) - SKIP_BUCKET;
 
 // Per-object thread local storage.
 pub struct ThreadLocal<T: Send> {
-    /// The number of threads with active TLS slots.
-    pub threads: AtomicUsize,
     buckets: [AtomicPtr<Entry<T>>; BUCKETS],
 }
 
@@ -55,7 +53,6 @@ where
         ThreadLocal {
             // Safety: `AtomicPtr` has the same representation as a pointer.
             buckets: unsafe { mem::transmute(buckets) },
-            threads: AtomicUsize::new(0),
         }
     }
 
@@ -107,12 +104,9 @@ where
         // Release: Necessary for iterators.
         entry.present.store(true, Ordering::Release);
 
-        self.threads.fetch_add(1, Ordering::Relaxed);
-
-        // SeqCst: Synchronize with the fence in `retire`:
-        // - If this fence comes first, the thread retiring will see the new thread
-        //   count and our entry.
-        // - If their fence comes first, we will see the new values of any pointers
+        // Synchronize with the heavy barrier in `retire`:
+        // - If this fence comes first, the thread retiring will see our entry.
+        // - If their barrier comes first, we will see the new values of any pointers
         //   being retired by that thread.
         atomic::fence(Ordering::SeqCst);
     }
@@ -275,6 +269,7 @@ mod tests {
     use super::*;
 
     use std::cell::RefCell;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
     use std::sync::{Arc, Barrier};
     use std::thread;
