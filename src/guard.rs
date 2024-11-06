@@ -365,6 +365,7 @@ pub unsafe fn unprotected() -> UnprotectedGuard {
 ///
 /// See [`unprotected`] for details.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct UnprotectedGuard;
 
 impl Guard for UnprotectedGuard {
