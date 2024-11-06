@@ -10,6 +10,14 @@ keywords = ["lock-free", "atomic", "garbage"]
 categories = ["concurrency", "memory-management"]
 
 [dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_System_Threading"], optional = true }
+
+[features]
+# Enables runtime detection of fast memory barriers on Linux and Windows.
+fast-barrier = ["windows-sys", "libc"]
 
 [dev-dependencies]
 criterion = "0.3.5"

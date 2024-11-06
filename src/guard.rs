@@ -150,13 +150,9 @@ impl LocalGuard<'_> {
 impl Guard for LocalGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
         // Safety: `self.reservation` is owned by the current thread.
-        unsafe {
-            self.collector
-                .raw
-                .protect_local(ptr, ordering, &*self.reservation)
-        }
+        unsafe { self.collector.raw.protect_local(ptr, &*self.reservation) }
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to
@@ -286,10 +282,10 @@ impl OwnedGuard<'_> {
 impl Guard for OwnedGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
         // Safety: `self.reservation` is owned by the current thread.
         let reservation = unsafe { &*self.reservation };
-        self.collector.raw.protect(ptr, ordering, reservation)
+        self.collector.raw.protect(ptr, reservation)
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to

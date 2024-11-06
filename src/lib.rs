@@ -5,6 +5,7 @@
 mod collector;
 mod deferred;
 mod guard;
+mod membarrier;
 mod raw;
 mod tls;
 mod utils;

@@ -1,3 +1,4 @@
+use crate::membarrier;
 use crate::tls::{Thread, ThreadLocal};
 use crate::utils::CachePadded;
 use crate::{AsLink, Deferred, Link};
@@ -119,15 +120,18 @@ impl Collector {
     #[inline]
     pub unsafe fn enter(&self, reservation: &Reservation) {
         // Mark the current thread as active.
-        //
-        // SeqCst: Establish a total order between this store and the fence in `retire`.
+        reservation
+            .head
+            .store(ptr::null_mut(), membarrier::light_store());
+
+        // This barrier, combined with the light store above, synchronizes with the heavy
+        // barrier in `retire`:
         // - If our store comes first, the thread retiring will see that we are active.
         // - If the fence comes first, we will see the new values of any objects being
         //   retired by that thread
         //
-        // Note that all pointer loads must also be SeqCst and thus participate in this
-        // total order.
-        reservation.head.store(ptr::null_mut(), Ordering::SeqCst);
+        // Note that all pointer loads perform a light barrier to participate in the total order.
+        membarrier::light_store_barrier();
     }
 
     /// Load an atomic pointer.
@@ -136,18 +140,16 @@ impl Collector {
     ///
     /// This method must only be called with the reservation of the current thread.
     #[inline]
-    pub unsafe fn protect_local<T>(
-        &self,
-        ptr: &AtomicPtr<T>,
-        _ordering: Ordering,
-        reservation: &Reservation,
-    ) -> *mut T {
+    pub unsafe fn protect_local<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
-            //
-            // Note that any protected loads still need to be SeqCst to participate in the
-            // total order. See `enter` for details.
-            return ptr.load(Ordering::SeqCst);
+            let value = ptr.load(membarrier::light_load());
+
+            // The light barrier ensures that this load participates in the total order.
+            // See `enter` for details.
+            membarrier::light_load_barrier();
+
+            return value;
         }
 
         // Load the last epoch we recorded on this thread.
@@ -156,17 +158,19 @@ impl Collector {
         let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
         loop {
-            // SeqCst:
-            // - Ensure that this load participates in the total order. See `enter` for
-            //   details.
-            // - Acquire the birth epoch of the node. We need to record at least the birth
-            //   epoch below to let other threads know we are accessing this pointer. Note
-            //   that this requires the pointer to have been stored with Release ordering,
-            //   which is technically undocumented. However, any Relaxed stores would be
-            //   unsound to access anyways.
-            let ptr = ptr.load(Ordering::SeqCst);
+            // Note that this ordering is guaranteed to be at least `Acquire`. We
+            // need to record at least the birth epoch to let other threads know we
+            // are accessing this pointer. Note that this requires the pointer to have
+            // been stored with `Release` ordering, which is technically undocumented.
+            // However, any `Relaxed` stores would be unsound to access anyways.
+            let ptr = ptr.load(membarrier::light_load());
 
-            // Relaxed: We acquired at least the pointer's birth epoch above.
+            // The light barrier ensures that this load participates in the total order.
+            // See `enter` for details.
+            membarrier::light_load_barrier();
+
+            // Relaxed: We acquired at least the pointer's birth epoch above, which is the
+            // only epoch we care about.
             let current_epoch = self.epoch.load(Ordering::Relaxed);
 
             // We are marked as active in the birth epoch of the pointer we are accessing.
@@ -177,13 +181,18 @@ impl Collector {
             }
 
             // Our epoch is out of date, record the new one and try again.
-            //
-            // SeqCst: Establish a total order between this store and the fence in `retire`.
+            reservation
+                .epoch
+                .store(current_epoch, membarrier::light_store());
+
+            // This barrier, combined with the light store above, synchronizes with the heavy
+            // barrier in `retire`:
             // - If our store comes first, the thread retiring will see that we are active
             //   in the current epoch.
             // - If the fence comes first, we will see the new values of any objects being
             //   retired by that thread.
-            reservation.epoch.store(current_epoch, Ordering::SeqCst);
+            membarrier::light_store_barrier();
+
             prev_epoch = current_epoch;
         }
     }
@@ -193,37 +202,38 @@ impl Collector {
     /// This method is safe to call concurrently from multiple threads with the
     /// same `thread` object.
     #[inline]
-    pub fn protect<T>(
-        &self,
-        ptr: &AtomicPtr<T>,
-        _ordering: Ordering,
-        reservation: &Reservation,
-    ) -> *mut T {
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
-            //
-            // Note that any protected loads still need to be SeqCst to participate in the
-            // total order. See `enter` for details.
-            return ptr.load(Ordering::SeqCst);
+            let value = ptr.load(membarrier::light_load());
+
+            // The light barrier ensures that this load participates in the total order.
+            // See `enter` for details.
+            membarrier::light_load_barrier();
+
+            return value;
         }
 
         // Load the last epoch we recorded for this reservation.
-        //
-        // SeqCst: This epoch may be modified concurrently by other threads. If
-        // a different thread recorded an epoch, we must force this thread to also
-        // participate in the total order and load the new values of any objects
-        // that may have been retired.
-        let mut prev_epoch = reservation.epoch.load(Ordering::SeqCst);
+        let mut prev_epoch = reservation.epoch.load(membarrier::light_load());
+
+        // This epoch may be modified concurrently by other threads. If a different
+        // thread recorded an epoch, we must force this thread to also participate
+        // in the total order and load the new values of any objects that may have
+        // been retired, hence the light barrier.
+        membarrier::light_load_barrier();
 
         loop {
-            // SeqCst:
-            // - Ensure that this load participates in the total order. See `enter` for
-            //   details.
-            // - Acquire the birth epoch of the node. We need to record at least the birth
-            //   epoch below to let other threads know we are accessing this pointer.
-            let ptr = ptr.load(Ordering::SeqCst);
+            // The light ordering is guaranteed to be at least `Acquire`, ensuring that
+            // we acquire the birth epoch of this pointer. See `protect_local` for details.
+            let ptr = ptr.load(membarrier::light_load());
 
-            // Relaxed: We acquired at least the pointer's birth epoch above.
+            // The light barrier ensures that this load participates in the total order.
+            // See `enter` for details.
+            membarrier::light_load_barrier();
+
+            // Relaxed: We acquired at least the pointer's birth epoch above, which is the
+            // only epoch we care about.
             let current_epoch = self.epoch.load(Ordering::Relaxed);
 
             // We are marked as active in the birth epoch of the pointer we are accessing.
@@ -235,20 +245,23 @@ impl Collector {
 
             // Our epoch is out of date, record the new one and try again.
             //
-            // SeqCst: Establish a total order between this store and the fence in `retire`.
+            // Note that this may be called concurrently, so the `fetch_max` ensures we
+            // never overwrite a newer epoch.
+            prev_epoch = reservation
+                .epoch
+                .fetch_max(current_epoch, membarrier::light_store())
+                .max(current_epoch);
+
+            // This barrier, combined with the light store above, synchronizes with the heavy
+            // barrier in `retire`:
             // - If our store comes first, the thread retiring will see that we are active
             //   in the current epoch.
             // - If the fence comes first, we will see the new values of any objects being
             //   retired by that thread.
             //
-            // Note that this may be called concurrently, so the `fetch_max` ensures we
-            // never overwrite a newer epoch. If a different thread beats us and writes
-            // a newer epoch, the SeqCst load guarantees that we still participate in the
-            // total order.
-            prev_epoch = reservation
-                .epoch
-                .fetch_max(current_epoch, Ordering::SeqCst)
-                .max(current_epoch);
+            // If a different thread beats us and writes a newer epoch, this implies a light load
+            // barrier that ensures that we still participate in the total order.
+            membarrier::light_store_barrier();
         }
     }
 
@@ -437,17 +450,17 @@ impl Collector {
     #[inline]
     pub unsafe fn try_retire(&self, local_batch: *mut LocalBatch, thread: Thread) {
         // Establish a total order between the retirement of nodes in this batch and
-        // stores marking a thread as active, or active in an epoch:
+        // light stores marking a thread as active, or active in an epoch:
         // - If the store comes first, we will see that the thread is active.
-        // - If this fence comes first, the thread will see the new values of any
+        // - If this barrier comes first, the thread will see the new values of any
         //   objects in this batch.
         //
-        // This fence also establishes synchronizes with the fence run when a thread is
-        // created:
-        // - If our fence comes first, they will see the new values of any objects in
+        // This barrier also establishes synchronizes with the light store executed when a
+        // thread is created:
+        // - If our barrier comes first, they will see the new values of any objects in
         //   this batch.
-        // - If their fence comes first, we will see the new thread.
-        atomic::fence(Ordering::SeqCst);
+        // - If their store comes first, we will see the new thread.
+        membarrier::heavy();
 
         // Safety: Local batches are only accessed by the current thread.
         let batch = unsafe { (*local_batch).batch };
@@ -476,7 +489,7 @@ impl Collector {
                 return;
             };
 
-            // If this thread is inactive, we can skip it. The SeqCst fence above
+            // If this thread is inactive, we can skip it. The heavy barrier above
             // ensurse that the next time it becomes active, it will see the new
             // values of any objects in this batch.
             //
@@ -487,7 +500,7 @@ impl Collector {
 
             // If this thread's epoch is behind the earliest birth epoch in this batch
             // we can skip it, as there is no way it could have accessed any of the objects
-            // in this batch.  The SeqCst fence above ensurse that the next time it attempts
+            // in this batch.  The heavy barrier above ensures that the next time it attempts
             // to access an object in this batch in `protect`, it will see it's new value.
             //
             // We make sure never to skip the current thread even if it's epoch is behind
@@ -495,7 +508,7 @@ impl Collector {
             // skipped if there is no active guard.
             //
             // Relaxed: We already ensured that we will see the relevant epoch through the
-            // SeqCst fence above. If the epoch is behind there is nothing to synchronize
+            // heavy barrier above. If the epoch is behind there is nothing to synchronize
             // with.
             //
             // If epoch tracking is disabled this is always false (0 < 0).
@@ -514,7 +527,7 @@ impl Collector {
         }
 
         // For any inactive threads we skipped above, synchronize with `leave` to ensure
-        // any accesses happen-before we retire. We ensured with the SeqCst fence above
+        // any accesses happen-before we retire. We ensured with the heavy barrier above
         // that the thread will see the new values of any objects in this batch the next
         // time it becomes active.
         atomic::fence(Ordering::Acquire);
@@ -536,9 +549,9 @@ impl Collector {
             loop {
                 // The thread became inactive, skip it.
                 //
-                // As long as the thread became inactive at some point after the SeqCst fence,
+                // As long as the thread became inactive at some point after the heavy barrier,
                 // it can no longer access any objects in this batch. The next time it becomes
-                // active it will load the new object values due to the SeqCst fence above.
+                // active it will load the new object values due to the heavy barrier above.
                 if prev == Entry::INACTIVE {
                     // Acquire: Synchronize with `leave` to ensure any accesses happen-before we
                     // retire.

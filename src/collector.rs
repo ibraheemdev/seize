@@ -1,5 +1,5 @@
 use crate::tls::Thread;
-use crate::{raw, LocalGuard, OwnedGuard};
+use crate::{membarrier, raw, LocalGuard, OwnedGuard};
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -28,6 +28,7 @@ impl Collector {
     pub fn new() -> Self {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
+        membarrier::detect();
         let cpus = std::thread::available_parallelism()
             .map(Into::into)
             .unwrap_or(1);
