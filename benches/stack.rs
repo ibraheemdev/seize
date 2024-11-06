@@ -1,104 +1,73 @@
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
+const THREADS: usize = 16;
+const ITEMS: usize = 1000;
+
 fn treiber_stack(c: &mut Criterion) {
     c.bench_function("trieber_stack-haphazard", |b| {
-        b.iter(|| {
-            let stack = Arc::new(haphazard_stack::TreiberStack::new());
-
-            let handles = (0..8)
-                .map(|_| {
-                    let stack = stack.clone();
-                    thread::spawn(move || {
-                        for i in 0..1000 {
-                            stack.push(i);
-                            assert!(stack.pop().is_some());
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            for i in 0..1000 {
-                stack.push(i);
-                assert!(stack.pop().is_some());
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert!(stack.pop().is_none());
-            assert!(stack.is_empty());
-        })
+        b.iter(run::<haphazard_stack::TreiberStack<usize>>)
     });
 
     c.bench_function("trieber_stack-crossbeam", |b| {
-        b.iter(|| {
-            let stack = Arc::new(crossbeam_stack::TreiberStack::new());
-
-            let handles = (0..8)
-                .map(|_| {
-                    let stack = stack.clone();
-                    thread::spawn(move || {
-                        for i in 0..1000 {
-                            stack.push(i);
-                            assert!(stack.pop().is_some());
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            for i in 0..1000 {
-                stack.push(i);
-                assert!(stack.pop().is_some());
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert!(stack.pop().is_none());
-            assert!(stack.is_empty());
-        })
+        b.iter(run::<crossbeam_stack::TreiberStack<usize>>)
     });
 
     c.bench_function("trieber_stack-seize", |b| {
-        b.iter(|| {
-            let stack = Arc::new(seize_stack::TreiberStack::new());
-
-            let handles = (0..8)
-                .map(|_| {
-                    let stack = stack.clone();
-                    thread::spawn(move || {
-                        for i in 0..1000 {
-                            stack.push(i);
-                            assert!(stack.pop().is_some());
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            for i in 0..1000 {
-                stack.push(i);
-                assert!(stack.pop().is_some());
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert!(stack.pop().is_none());
-            assert!(stack.is_empty());
-        })
+        b.iter(run::<seize_stack::TreiberStack<usize>>)
     });
+}
+
+trait Stack<T> {
+    fn new() -> Self;
+    fn push(&self, value: T);
+    fn pop(&self) -> Option<T>;
+    fn is_empty(&self) -> bool;
+}
+
+fn run<T>()
+where
+    T: Stack<usize> + Send + Sync + 'static,
+{
+    let stack = Arc::new(T::new());
+    let barrier = Arc::new(Barrier::new(THREADS));
+
+    let handles = (0..THREADS - 1)
+        .map(|_| {
+            let stack = stack.clone();
+            let barrier = barrier.clone();
+
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..ITEMS {
+                    stack.push(i);
+                    assert!(stack.pop().is_some());
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    barrier.wait();
+    for i in 0..ITEMS {
+        stack.push(i);
+        assert!(stack.pop().is_some());
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    assert!(stack.pop().is_none());
+    assert!(stack.is_empty());
 }
 
 criterion_group!(benches, treiber_stack);
 criterion_main!(benches);
 
 mod seize_stack {
+    use super::Stack;
     use seize::{reclaim, Collector, Guard, Linked};
     use std::mem::ManuallyDrop;
     use std::ptr::{self, NonNull};
@@ -116,15 +85,15 @@ mod seize_stack {
         next: *mut Linked<Node<T>>,
     }
 
-    impl<T> TreiberStack<T> {
-        pub fn new() -> TreiberStack<T> {
+    impl<T> Stack<T> for TreiberStack<T> {
+        fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
                 collector: Collector::new().epoch_frequency(None),
             }
         }
 
-        pub fn push(&self, value: T) {
+        fn push(&self, value: T) {
             let node = self.collector.link_boxed(Node {
                 data: ManuallyDrop::new(value),
                 next: ptr::null_mut(),
@@ -146,7 +115,7 @@ mod seize_stack {
             }
         }
 
-        pub fn pop(&self) -> Option<T> {
+        fn pop(&self) -> Option<T> {
             let guard = self.collector.enter();
 
             loop {
@@ -169,7 +138,7 @@ mod seize_stack {
             }
         }
 
-        pub fn is_empty(&self) -> bool {
+        fn is_empty(&self) -> bool {
             let guard = self.collector.enter();
             guard.protect(&self.head, Ordering::Relaxed).is_null()
         }
@@ -183,6 +152,7 @@ mod seize_stack {
 }
 
 mod haphazard_stack {
+    use super::Stack;
     use haphazard::{Domain, HazardPointer};
     use std::mem::ManuallyDrop;
     use std::ptr;
@@ -202,14 +172,14 @@ mod haphazard_stack {
     unsafe impl<T> Send for Node<T> {}
     unsafe impl<T> Sync for Node<T> {}
 
-    impl<T> TreiberStack<T> {
-        pub fn new() -> TreiberStack<T> {
+    impl<T> Stack<T> for TreiberStack<T> {
+        fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::default(),
             }
         }
 
-        pub fn push(&self, value: T) {
+        fn push(&self, value: T) {
             let node = Box::into_raw(Box::new(Node {
                 data: ManuallyDrop::new(value),
                 next: ptr::null_mut(),
@@ -235,7 +205,7 @@ mod haphazard_stack {
             }
         }
 
-        pub fn pop(&self) -> Option<T> {
+        fn pop(&self) -> Option<T> {
             let mut h = HazardPointer::new();
 
             loop {
@@ -256,7 +226,7 @@ mod haphazard_stack {
             }
         }
 
-        pub fn is_empty(&self) -> bool {
+        fn is_empty(&self) -> bool {
             let mut h = HazardPointer::new();
             unsafe { h.protect(&self.head) }.is_none()
         }
@@ -270,6 +240,7 @@ mod haphazard_stack {
 }
 
 mod crossbeam_stack {
+    use super::Stack;
     use crossbeam_epoch::{Atomic, Owned, Shared};
     use std::mem::ManuallyDrop;
     use std::ptr;
@@ -289,14 +260,14 @@ mod crossbeam_stack {
         next: *const Node<T>,
     }
 
-    impl<T> TreiberStack<T> {
-        pub fn new() -> TreiberStack<T> {
+    impl<T> Stack<T> for TreiberStack<T> {
+        fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: Atomic::null(),
             }
         }
 
-        pub fn push(&self, value: T) {
+        fn push(&self, value: T) {
             let guard = crossbeam_epoch::pin();
 
             let mut node = Owned::new(Node {
@@ -321,7 +292,7 @@ mod crossbeam_stack {
             }
         }
 
-        pub fn pop(&self) -> Option<T> {
+        fn pop(&self) -> Option<T> {
             let guard = crossbeam_epoch::pin();
 
             loop {
@@ -353,7 +324,7 @@ mod crossbeam_stack {
             }
         }
 
-        pub fn is_empty(&self) -> bool {
+        fn is_empty(&self) -> bool {
             let guard = crossbeam_epoch::pin();
             self.head.load(Ordering::Relaxed, &guard).is_null()
         }
