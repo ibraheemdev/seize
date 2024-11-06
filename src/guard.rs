@@ -336,8 +336,8 @@ impl Drop for OwnedGuard<'_> {
         // Safety: `self.thread` is an owned thread.
         unsafe { self.collector.raw.leave(reservation) };
 
-        // We are now inactive and can free the thread slot.
-        self.thread.free();
+        // Safety: We are in `drop` and never share `self.thread`.
+        unsafe { self.thread.free() };
     }
 }
 

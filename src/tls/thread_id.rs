@@ -78,7 +78,11 @@ impl Thread {
     }
 
     /// Free the given thread.
-    pub fn free(self) {
+    ///
+    /// # Safety
+    ///
+    /// This function must only be called once on a given thread.
+    pub unsafe fn free(self) {
         thread_id_manager().lock().unwrap().free(self.id);
     }
 }
@@ -93,7 +97,8 @@ struct ThreadGuard(Thread);
 
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        self.0.free();
+        // Safety: We are in `drop` and never copy the `ThreadGuard`.
+        unsafe { self.0.free() };
     }
 }
 
