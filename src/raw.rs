@@ -80,7 +80,8 @@ impl Collector {
                 //
                 // Relaxed: Synchronization only occurs when an epoch is recorded by a
                 // given thread to protect a pointer, not when incrementing the epoch.
-                if *count % frequency.get() == 0 {
+                if *count >= frequency.get() {
+                    *count = 0;
                     self.epoch.fetch_add(1, Ordering::Relaxed) + 1
                 } else {
                     self.epoch.load(Ordering::Relaxed)
