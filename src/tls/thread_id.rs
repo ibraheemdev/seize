@@ -5,6 +5,8 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use super::{SKIP, SKIP_BUCKET};
+
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -55,16 +57,18 @@ pub struct Thread {
 }
 
 impl Thread {
-    fn new(id: usize) -> Thread {
-        let bucket = (usize::BITS as usize) - id.leading_zeros() as usize;
-        let bucket_size = 1 << bucket.saturating_sub(1);
-        let index = if id != 0 { id ^ bucket_size } else { 0 };
+    pub(crate) fn new(id: usize) -> Thread {
+        let skipped = id.checked_add(SKIP).expect("exceeded maximum length");
+        let bucket = usize::BITS - skipped.leading_zeros();
+        let bucket = (bucket as usize) - (SKIP_BUCKET + 1);
+        let bucket_size = Thread::bucket_size(bucket);
+        let index = skipped ^ bucket_size;
 
         Thread { id, bucket, index }
     }
 
-    pub fn bucket_size(&self) -> usize {
-        1 << self.bucket.saturating_sub(1)
+    pub fn bucket_size(bucket: usize) -> usize {
+        1 << (bucket + SKIP_BUCKET)
     }
 
     /// Get the current thread.
@@ -132,28 +136,30 @@ impl Drop for ThreadGuard {
 
 #[test]
 fn test_thread() {
-    let thread = Thread::new(0);
-    assert_eq!(thread.id, 0);
-    assert_eq!(thread.bucket, 0);
-    assert_eq!(thread.index, 0);
+    use crate::tls::BUCKETS;
 
-    let thread = Thread::new(1);
-    assert_eq!(thread.id, 1);
-    assert_eq!(thread.bucket, 1);
-    assert_eq!(thread.index, 0);
+    assert_eq!(Thread::bucket_size(0), 32);
+    for i in 0..32 {
+        let loc = Thread::new(i);
+        assert_eq!(loc.bucket, 0);
+        assert_eq!(loc.index, i);
+    }
 
-    let thread = Thread::new(2);
-    assert_eq!(thread.id, 2);
-    assert_eq!(thread.bucket, 2);
-    assert_eq!(thread.index, 0);
+    assert_eq!(Thread::bucket_size(1), 64);
+    for i in 33..96 {
+        let loc = Thread::new(i);
+        assert_eq!(loc.bucket, 1);
+        assert_eq!(loc.index, i - 32);
+    }
 
-    let thread = Thread::new(3);
-    assert_eq!(thread.id, 3);
-    assert_eq!(thread.bucket, 2);
-    assert_eq!(thread.index, 1);
+    assert_eq!(Thread::bucket_size(2), 128);
+    for i in 96..224 {
+        let loc = Thread::new(i);
+        assert_eq!(loc.bucket, 2);
+        assert_eq!(loc.index, i - 96);
+    }
 
-    let thread = Thread::new(19);
-    assert_eq!(thread.id, 19);
-    assert_eq!(thread.bucket, 5);
-    assert_eq!(thread.index, 3);
+    let max = Thread::new(usize::MAX - SKIP);
+    assert_eq!(max.bucket, BUCKETS - 1);
+    assert_eq!(max.index, (1 << 63) - 1);
 }

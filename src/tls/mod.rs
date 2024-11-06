@@ -14,7 +14,11 @@ use std::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 pub use thread_id::Thread;
 
-const BUCKETS: usize = (usize::BITS + 1) as usize;
+// Skip smaller buckets to avoid unnecessary allocations.
+const SKIP: usize = 32;
+const SKIP_BUCKET: usize = ((usize::BITS - SKIP.leading_zeros()) as usize) - 1;
+
+const BUCKETS: usize = (usize::BITS as usize) - SKIP_BUCKET;
 
 // Per-object thread local storage.
 pub struct ThreadLocal<T: Send> {
@@ -36,19 +40,16 @@ where
 {
     /// Create a `ThreadLocal` container with the given initial capacity.
     pub fn with_capacity(capacity: usize) -> ThreadLocal<T> {
-        let allocated_buckets = capacity
-            .checked_sub(1)
-            .map(|c| (usize::BITS as usize) - (c.leading_zeros() as usize) + 1)
-            .unwrap_or(0);
+        let init = match capacity {
+            0 => 0,
+            // Initialize enough buckets for `capacity` elements.
+            n => Thread::new(n).bucket,
+        };
 
         let mut buckets = [ptr::null_mut(); BUCKETS];
-        let mut bucket_size = 1;
-        for (i, bucket) in buckets[..allocated_buckets].iter_mut().enumerate() {
+        for (i, bucket) in buckets[..=init].iter_mut().enumerate() {
+            let bucket_size = Thread::bucket_size(i);
             *bucket = allocate_bucket::<T>(bucket_size);
-
-            if i != 0 {
-                bucket_size <<= 1;
-            }
         }
 
         ThreadLocal {
@@ -118,7 +119,7 @@ where
     // Initialize the entry for the given thread.
     #[cold]
     fn initialize(&self, bucket: &AtomicPtr<Entry<T>>, thread: Thread) -> *mut Entry<T> {
-        let new_bucket = allocate_bucket(thread.bucket_size());
+        let new_bucket = allocate_bucket(Thread::bucket_size(thread.bucket));
 
         match bucket.compare_exchange(
             ptr::null_mut(),
@@ -133,7 +134,7 @@ where
             Err(other) => unsafe {
                 let _ = Box::from_raw(ptr::slice_from_raw_parts_mut(
                     new_bucket,
-                    thread.bucket_size(),
+                    Thread::bucket_size(thread.bucket),
                 ));
 
                 other
@@ -168,7 +169,7 @@ where
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             bucket: 0,
-            bucket_size: 1,
+            bucket_size: Thread::bucket_size(0),
             index: 0,
             thread_local: self,
         }
@@ -180,23 +181,16 @@ where
     T: Send,
 {
     fn drop(&mut self) {
-        let mut bucket_size = 1;
-
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             let bucket_ptr = *bucket.get_mut();
-
-            let this_bucket_size = bucket_size;
-            if i != 0 {
-                bucket_size <<= 1;
-            }
 
             if bucket_ptr.is_null() {
                 continue;
             }
 
-            let _ = unsafe {
-                Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, this_bucket_size))
-            };
+            let bucket_size = Thread::bucket_size(i);
+            let _ =
+                unsafe { Box::from_raw(std::slice::from_raw_parts_mut(bucket_ptr, bucket_size)) };
         }
     }
 }
