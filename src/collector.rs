@@ -310,16 +310,6 @@ impl Collector {
     }
 }
 
-impl Clone for Collector {
-    /// Creates a new, independent collector with the same configuration as this
-    /// one.
-    fn clone(&self) -> Self {
-        Collector::new()
-            .batch_size(self.raw.batch_size)
-            .epoch_frequency(self.raw.epoch_frequency)
-    }
-}
-
 impl Default for Collector {
     fn default() -> Self {
         Self::new()
