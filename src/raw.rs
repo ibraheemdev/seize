@@ -610,7 +610,8 @@ impl Collector {
     /// # Safety
     ///
     /// `list` must be a valid reservation list.
-    #[inline]
+    #[cold]
+    #[inline(never)]
     unsafe fn traverse(mut list: *mut Entry) {
         while !list.is_null() {
             let curr = list;
