@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -89,6 +90,12 @@ pub trait Guard {
     /// This can be used to verify that user-provided guards are valid
     /// for the expected collector.
     fn belongs_to(&self, collector: &Collector) -> bool;
+
+    /// Create a [`Link`] that can be used to link an object to the collector.
+    ///
+    /// This is identical to [`Collector::link`], but may have slightly less
+    /// overhead due to the existence of a guard.
+    fn link(&self, collector: &Collector) -> Link;
 }
 
 /// A guard that keeps the current thread marked as active.
@@ -192,6 +199,16 @@ impl Guard for LocalGuard<'_> {
     #[inline]
     fn belongs_to(&self, collector: &Collector) -> bool {
         Collector::id_eq(self.collector, collector)
+    }
+
+    #[inline]
+    fn link(&self, collector: &Collector) -> Link {
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &*self.reservation };
+
+        Link {
+            node: UnsafeCell::new(collector.raw.node(reservation)),
+        }
     }
 }
 
@@ -325,6 +342,16 @@ impl Guard for OwnedGuard<'_> {
     fn belongs_to(&self, collector: &Collector) -> bool {
         Collector::id_eq(self.collector, collector)
     }
+
+    #[inline]
+    fn link(&self, collector: &Collector) -> Link {
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &*self.reservation };
+
+        Link {
+            node: UnsafeCell::new(collector.raw.node(reservation)),
+        }
+    }
 }
 
 impl Drop for OwnedGuard<'_> {
@@ -400,5 +427,10 @@ impl Guard for UnprotectedGuard {
     #[inline]
     fn belongs_to(&self, _collector: &Collector) -> bool {
         true
+    }
+
+    #[inline]
+    fn link(&self, collector: &Collector) -> Link {
+        collector.link()
     }
 }

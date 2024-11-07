@@ -163,8 +163,11 @@ impl Collector {
     /// and [`link_boxed`](Collector::link_boxed) helpers.
     #[inline]
     pub fn link(&self) -> Link {
+        // Safety: Accessing the reservation of the current thread is always valid.
+        let reservation = unsafe { self.raw.reservation(Thread::current()) };
+
         Link {
-            node: UnsafeCell::new(self.raw.node()),
+            node: UnsafeCell::new(self.raw.node(reservation)),
         }
     }
 

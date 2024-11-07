@@ -34,9 +34,6 @@ pub struct Collector {
     /// reservations before exiting.
     reservations: ThreadLocal<CachePadded<Reservation>>,
 
-    //// The number of nodes allocated on a given thread.
-    node_count: ThreadLocal<CachePadded<UnsafeCell<u64>>>,
-
     /// The number of object allocations before advancing the global epoch
     /// on a given thread.
     ///
@@ -57,15 +54,18 @@ impl Collector {
             epoch: AtomicU64::new(1),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
-            node_count: ThreadLocal::with_capacity(threads),
             epoch_frequency: Some(epoch_frequency),
             batch_size,
         }
     }
 
     /// Create a new node.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe to call concurrently on the same thread.
     #[inline]
-    pub fn node(&self) -> Node {
+    pub fn node(&self, reservation: &Reservation) -> Node {
         // Record the current epoch value.
         //
         // Note that it's fine if we see an older epoch, in which case more threads
@@ -73,15 +73,15 @@ impl Collector {
         let birth_epoch = match self.epoch_frequency {
             Some(ref frequency) => {
                 // Safety: Node counts are only accessed by the current thread.
-                let count = unsafe { &mut *self.node_count.load(Thread::current()).get() };
-                *count += 1;
+                let count = reservation.node_count.get();
+                reservation.node_count.set(count + 1);
 
                 // Advance the global epoch if we reached the epoch frequency.
                 //
                 // Relaxed: Synchronization only occurs when an epoch is recorded by a
                 // given thread to protect a pointer, not when incrementing the epoch.
-                if *count >= frequency.get() {
-                    *count = 0;
+                if count >= frequency.get() {
+                    reservation.node_count.set(0);
                     self.epoch.fetch_add(1, Ordering::Relaxed) + 1
                 } else {
                     self.epoch.load(Ordering::Relaxed)
@@ -725,6 +725,8 @@ pub struct Reservation {
     pub guards: Cell<u64>,
     /// A lock used for owned guards to prevent concurrent operations.
     pub lock: Mutex<()>,
+    /// The number of nodes allocated by this thread.
+    node_count: Cell<u64>,
 }
 
 impl Default for Reservation {
@@ -734,6 +736,7 @@ impl Default for Reservation {
             epoch: AtomicU64::new(0),
             guards: Cell::new(0),
             lock: Mutex::new(()),
+            node_count: Cell::new(0),
         }
     }
 }
