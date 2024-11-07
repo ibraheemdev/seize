@@ -248,10 +248,7 @@ where
                 }
             }
 
-            if self.bucket != 0 {
-                self.bucket_size <<= 1;
-            }
-
+            self.bucket_size <<= 1;
             self.bucket += 1;
             self.index = 0;
         }
@@ -279,7 +276,7 @@ mod tests {
 
     use std::cell::RefCell;
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     fn make_create() -> Arc<dyn Fn() -> usize + Send + Sync> {
@@ -375,6 +372,25 @@ mod tests {
         assert_eq!(dropped.load(Relaxed), 0);
         drop(local);
         assert_eq!(dropped.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn iter_many() {
+        let tls = Arc::new(ThreadLocal::with_capacity(0));
+        let barrier = Arc::new(Barrier::new(65));
+
+        for i in 0..64 {
+            let tls = tls.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                dbg!(i);
+                tls.load_or(|| 1, Thread::current());
+                barrier.wait();
+            });
+        }
+
+        barrier.wait();
+        assert_eq!(tls.iter().count(), 64);
     }
 
     #[test]
