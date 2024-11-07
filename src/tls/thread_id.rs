@@ -85,6 +85,7 @@ impl Thread {
 
     /// Slow path for allocating a thread ID.
     #[cold]
+    #[inline(never)]
     fn init_slow(thread: &Cell<Option<Thread>>) -> Thread {
         let new = Thread::create();
         thread.set(Some(new));

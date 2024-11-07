@@ -99,6 +99,7 @@ where
     //
     // The thread must have unique access to the uninitialized `entry`.
     #[cold]
+    #[inline(never)]
     unsafe fn write(&self, entry: &Entry<T>, create: impl Fn() -> T) {
         // Insert the new element into the bucket.
         unsafe { entry.value.get().write(MaybeUninit::new(create())) };
@@ -118,6 +119,7 @@ where
 
     // Initialize the entry for the given thread.
     #[cold]
+    #[inline(never)]
     fn initialize(&self, bucket: &AtomicPtr<Entry<T>>, thread: Thread) -> *mut Entry<T> {
         let new_bucket = allocate_bucket(Thread::bucket_size(thread.bucket));
 
