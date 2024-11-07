@@ -416,7 +416,7 @@ fn reentrant() {
 
 #[test]
 fn owned_guard() {
-    let collector = Collector::new().batch_size(5).epoch_frequency(None);
+    let collector = Collector::new().batch_size(5);
     let dropped = Arc::new(AtomicUsize::new(0));
 
     let objects = UnsafeSend(
@@ -462,7 +462,7 @@ fn owned_guard() {
 
 #[test]
 fn owned_guard_concurrent() {
-    let collector = Collector::new().batch_size(1).epoch_frequency(None);
+    let collector = Collector::new().batch_size(1);
     let dropped = Arc::new(AtomicUsize::new(0));
 
     let objects = UnsafeSend(

@@ -459,19 +459,6 @@ impl Collector {
 
         // Safety: The batch is non-null.
         let batch_entries = unsafe { (*batch).entries.as_mut_ptr() };
-
-        // If there are not enough entries in this batch to add to all active threads
-        // reservation lists, we have to try again later.
-        //
-        // Relaxed: the fence above already ensures that we see any threads that might
-        // have access to any objects in this batch. Any threads that were created
-        // after it will see their new values.
-        //
-        // Safety: Local batch pointers are valid until relamation.
-        if unsafe { (*batch).entries.len() } <= self.reservations.threads.load(Ordering::Relaxed) {
-            return;
-        }
-
         let current_reservation = self.reservations.load(thread);
         let mut marked = 0;
 
