@@ -38,6 +38,9 @@ pub trait Guard {
     /// may allow memory to be reclaimed more quickly after the guard is
     /// dropped.
     ///
+    /// Note that the batch must contain at least as many objects as the
+    /// number of currently active threads for a flush to be performed.
+    ///
     /// See [`Collector::batch_size`] for details about batching.
     fn flush(&self);
 
