@@ -56,8 +56,15 @@ impl Collector {
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             epoch_frequency: Some(epoch_frequency),
-            batch_size,
+            batch_size: batch_size.next_power_of_two(),
         }
+    }
+
+    /// Sets the number of values that must be in a batch
+    /// before reclamation is attempted.
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.next_power_of_two();
+        self
     }
 
     /// Create a new node.
@@ -359,7 +366,7 @@ impl Collector {
         };
 
         // Attempt to retire the batch if we have enough entries.
-        if len % self.batch_size == 0 {
+        if len & (self.batch_size - 1) == 0 {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
             unsafe { self.try_retire(local_batch, thread) }
@@ -410,7 +417,9 @@ impl Collector {
 
                 // We want to keep retirement amortized consistently, so only retire if we
                 // reach a multiple of the batch size
-                should_retire = should_retire || (*batch).entries.len() % self.batch_size == 0;
+                if (*batch).entries.len() & (self.batch_size - 1) == 0 {
+                    should_retire = true;
+                }
             });
         }
 
