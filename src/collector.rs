@@ -22,6 +22,7 @@ unsafe impl Sync for Collector {}
 
 impl Collector {
     const DEFAULT_BATCH_SIZE: usize = 32;
+    const DEFAULT_RECLAIM_FREQUENCY: usize = 1;
     const DEFAULT_EPOCH_TICK: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(110) };
 
     /// Creates a new collector.
@@ -36,7 +37,12 @@ impl Collector {
         let batch_size = cpus.min(Self::DEFAULT_BATCH_SIZE);
 
         Self {
-            raw: raw::Collector::new(cpus, Self::DEFAULT_EPOCH_TICK, batch_size),
+            raw: raw::Collector::new(
+                cpus,
+                Self::DEFAULT_EPOCH_TICK,
+                Self::DEFAULT_RECLAIM_FREQUENCY,
+                batch_size,
+            ),
             id: ID.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -57,8 +63,13 @@ impl Collector {
     ///
     /// If `None` is passed epoch tracking, and protection
     /// against stalled threads, will be disabled completely.
-    pub fn epoch_frequency(mut self, n: Option<NonZeroU64>) -> Self {
-        self.raw.epoch_frequency = n;
+    pub fn epoch_frequency(mut self, frequency: Option<NonZeroU64>) -> Self {
+        self.raw.epoch_frequency = frequency;
+        self
+    }
+
+    pub fn reclaim_frequency(mut self, frequency: usize) -> Self {
+        self.raw.reclaim_frequency = frequency;
         self
     }
 
@@ -80,10 +91,10 @@ impl Collector {
     /// than the number of threads accessing objects.
     ///
     /// The default batch size is `32`.
-    pub fn batch_size(self, batch_size: usize) -> Self {
+    pub fn batch_size(self, size: usize) -> Self {
         Self {
             id: self.id,
-            raw: self.raw.batch_size(batch_size),
+            raw: self.raw.batch_size(size),
         }
     }
 
@@ -167,7 +178,7 @@ impl Collector {
     #[inline]
     pub fn link(&self) -> Link {
         // Safety: Accessing the reservation of the current thread is always valid.
-        let reservation = unsafe { self.raw.reservation(Thread::current()) };
+        let reservation = unsafe { &mut *self.raw.reservation(Thread::current()) };
 
         Link {
             node: UnsafeCell::new(self.raw.node(reservation)),
@@ -276,10 +287,15 @@ impl Collector {
     pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
+        let current = Thread::current();
+
+        // Safety: Accessing the reservation of the current thread is always valid.
+        let reservation = unsafe { &mut *self.raw.reservation(current) };
+
         // Note that `add` doesn't ever actually reclaim the pointer immediately if
         // the current thread is active. Instead, it adds it to the current thread's
         // reclamation list, but we don't guarantee that publicly.
-        unsafe { self.raw.add(ptr, reclaim, Thread::current()) }
+        unsafe { self.raw.add(ptr, reclaim, reservation, current) }
     }
 
     /// Reclaim any values that have been retired.
@@ -330,6 +346,20 @@ impl fmt::Debug for Collector {
         f.field("batch_size", &self.raw.batch_size)
             .field("epoch_frequency", &self.raw.epoch_frequency)
             .finish()
+    }
+}
+
+pub struct Stolen {
+    pub(crate) entry: raw::Entry,
+}
+
+impl Stolen {
+    pub fn link(&self) -> *mut Link {
+        self.entry.node.cast()
+    }
+
+    pub fn reclaimer(&self) -> unsafe fn(*mut Link) {
+        self.entry.reclaim
     }
 }
 

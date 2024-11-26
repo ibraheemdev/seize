@@ -3,9 +3,10 @@ use crate::tls::{Thread, ThreadLocal};
 use crate::utils::CachePadded;
 use crate::{AsLink, Deferred, Link};
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::num::NonZeroU64;
-use std::ptr;
+use std::ptr::{self, addr_of_mut};
 use std::sync::atomic::{self, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -25,7 +26,7 @@ pub struct Collector {
     ///
     /// Retired values are added to thread-local batches before starting
     /// the reclamation process, to amortize the cost of retirement.
-    batches: ThreadLocal<CachePadded<UnsafeCell<LocalBatch>>>,
+    batches: ThreadLocal<CachePadded<LocalBatches>>,
 
     /// Per-thread reservations lists.
     ///
@@ -41,13 +42,20 @@ pub struct Collector {
     /// If this is `None`, epoch tracking is disabled.
     pub(crate) epoch_frequency: Option<NonZeroU64>,
 
+    pub(crate) reclaim_frequency: usize,
+
     /// The minimum number of nodes required in a batch before freeing.
     pub(crate) batch_size: usize,
 }
 
 impl Collector {
     /// Create a collector with the provided configuration.
-    pub fn new(threads: usize, epoch_frequency: NonZeroU64, batch_size: usize) -> Self {
+    pub fn new(
+        threads: usize,
+        epoch_frequency: NonZeroU64,
+        reclaim_frequency: usize,
+        batch_size: usize,
+    ) -> Self {
         Self {
             // Note the global epoch must start at 1 because thread-local epochs
             // start at 0. All threads must be forced to synchronize when protecting
@@ -55,6 +63,7 @@ impl Collector {
             epoch: AtomicU64::new(1),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
+            reclaim_frequency,
             epoch_frequency: Some(epoch_frequency),
             batch_size: batch_size.next_power_of_two(),
         }
@@ -62,34 +71,33 @@ impl Collector {
 
     /// Sets the number of values that must be in a batch
     /// before reclamation is attempted.
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size.next_power_of_two();
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = size.next_power_of_two();
         self
     }
 
-    /// Create a new node.
+    /// Returns the birth epoch for a new node.
     ///
     /// # Safety
     ///
     /// This method is not safe to call concurrently on the same thread.
-    #[inline]
-    pub fn node(&self, reservation: &Reservation) -> Node {
+    fn birth_epoch(&self, reservation: &mut Reservation) -> u64 {
         // Record the current epoch value.
         //
         // Note that it's fine if we see an older epoch, in which case more threads
         // may be counted as active.
-        let birth_epoch = match self.epoch_frequency {
+        match self.epoch_frequency {
             Some(ref frequency) => {
                 // Safety: Node counts are only accessed by the current thread.
-                let count = reservation.node_count.get();
-                reservation.node_count.set(count + 1);
+                let count = reservation.node_count;
+                reservation.node_count += 1;
 
                 // Advance the global epoch if we reached the epoch frequency.
                 //
                 // Relaxed: Synchronization only occurs when an epoch is recorded by a
                 // given thread to protect a pointer, not when incrementing the epoch.
                 if count >= frequency.get() {
-                    reservation.node_count.set(0);
+                    reservation.node_count = 0;
                     self.epoch.fetch_add(1, Ordering::Relaxed) + 1
                 } else {
                     self.epoch.load(Ordering::Relaxed)
@@ -98,9 +106,19 @@ impl Collector {
 
             // We aren't tracking epochs.
             None => 0,
-        };
+        }
+    }
 
-        Node { birth_epoch }
+    /// Create a new node.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe to call concurrently on the same thread.
+    #[inline]
+    pub fn node(&self, reservation: &mut Reservation) -> Node {
+        Node {
+            birth_epoch: self.birth_epoch(reservation),
+        }
     }
 
     /// Return the reservation for the current thread.
@@ -110,7 +128,7 @@ impl Collector {
     /// The reservation must not be accessed concurrently across multiple
     /// threads without correct synchronization.
     #[inline]
-    pub unsafe fn reservation(&self, thread: Thread) -> &Reservation {
+    pub unsafe fn reservation(&self, thread: Thread) -> *mut Reservation {
         self.reservations.load(thread)
     }
 
@@ -125,7 +143,7 @@ impl Collector {
     /// This method is not safe to call concurrently on the same thread. This
     /// method must only be called if the current thread is inactive.
     #[inline]
-    pub unsafe fn enter(&self, reservation: &Reservation) {
+    pub unsafe fn enter(&self, reservation: &mut Reservation) {
         // Mark the current thread as active.
         reservation
             .head
@@ -280,7 +298,7 @@ impl Collector {
     /// `leave`. Additionally, method is not safe to call concurrently with
     /// the same reservation.
     #[inline]
-    pub unsafe fn leave(&self, reservation: &Reservation) {
+    pub unsafe fn leave(&self, reservation: &mut Reservation) {
         // Release: Exit the critical section, ensuring that any pointer accesses
         // happen-before we are marked as inactive.
         let head = reservation.head.swap(Entry::INACTIVE, Ordering::Release);
@@ -291,7 +309,7 @@ impl Collector {
             atomic::fence(Ordering::Acquire);
 
             // Decrement the reference counts of any batches that were retired.
-            unsafe { Collector::traverse(head) }
+            unsafe { self.traverse(head, reservation) }
         }
     }
 
@@ -303,7 +321,7 @@ impl Collector {
     /// `leave`. Additionally, method is not safe to call concurrently with
     /// the same reservation.
     #[inline]
-    pub unsafe fn refresh(&self, reservation: &Reservation) {
+    pub unsafe fn refresh(&self, reservation: &mut Reservation) {
         // This stores acts as a combined call to `leave` and `enter`.
         //
         // SeqCst: Establish the same ordering as `enter` and `leave`.
@@ -311,7 +329,7 @@ impl Collector {
 
         if head != Entry::INACTIVE {
             // Decrement the reference counts of any batches that were retired.
-            unsafe { Collector::traverse(head) }
+            unsafe { self.traverse(head, reservation) }
         }
     }
 
@@ -324,18 +342,23 @@ impl Collector {
     /// inactive threads. Additionally, this method is not safe to call
     /// concurrently with the same `thread`.
     #[inline]
-    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link), thread: Thread)
-    where
+    pub unsafe fn add<T>(
+        &self,
+        ptr: *mut T,
+        reclaim: unsafe fn(*mut Link),
+        reservation: &mut Reservation,
+        thread: Thread,
+    ) where
         T: AsLink,
     {
-        let local_batch = self.batches.load(thread).get();
+        let local_batch = self.batches.load(thread);
 
         // Safety: Local batches are only accessed by the current thread.
-        let batch = unsafe { (*local_batch).get_or_init(self.batch_size) };
+        let batch = unsafe { (*local_batch).get_or_init(reservation, self.batch_size) };
 
         // If we are in a recursive call during `drop` or `reclaim_all`, reclaim the
         // object immediately.
-        if batch == LocalBatch::DROP {
+        if batch == LocalBatches::DROP {
             unsafe { reclaim(ptr.cast::<Link>()) }
             return;
         }
@@ -369,7 +392,7 @@ impl Collector {
         if len & (self.batch_size - 1) == 0 {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
-            unsafe { self.try_retire(local_batch, thread) }
+            unsafe { self.try_retire(local_batch, reservation, thread) }
         }
     }
 
@@ -385,16 +408,17 @@ impl Collector {
         &self,
         deferred: &mut Deferred,
         reclaim: unsafe fn(*mut Link),
+        reservation: &mut Reservation,
         thread: Thread,
     ) {
-        let local_batch = self.batches.load(thread).get();
+        let local_batch = self.batches.load(thread);
 
         // Safety: Local batches are only accessed by the current thread.
-        let batch = unsafe { (*local_batch).get_or_init(self.batch_size) };
+        let batch = unsafe { (*local_batch).get_or_init(reservation, self.batch_size) };
 
         // If we are in a recursive call during `drop` or `reclaim_all`, reclaim the
         // batch immediately.
-        if batch == LocalBatch::DROP {
+        if batch == LocalBatches::DROP {
             deferred.for_each(|ptr| unsafe { reclaim(ptr.cast::<Link>()) });
             return;
         }
@@ -427,7 +451,7 @@ impl Collector {
         if should_retire {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
-            unsafe { self.try_retire(local_batch, thread) }
+            unsafe { self.try_retire(local_batch, reservation, thread) }
         }
     }
 
@@ -437,12 +461,12 @@ impl Collector {
     ///
     /// This method is not safe to call concurrently with the same `thread`.
     #[inline]
-    pub unsafe fn try_retire_batch(&self, thread: Thread) {
-        let local_batch = self.batches.load(thread).get();
+    pub unsafe fn try_retire_batch(&self, reservation: &mut Reservation, thread: Thread) {
+        let local_batch = self.batches.load(thread);
 
         // Safety: caller guarantees this method is not called concurrently with the
         // same `thread`.
-        unsafe { self.try_retire(local_batch, thread) }
+        unsafe { self.try_retire(local_batch, reservation, thread) }
     }
 
     /// Attempt to retire objects in this batch.
@@ -457,7 +481,12 @@ impl Collector {
     /// references the the local batch, as they may be invalidated by
     /// recursive calls to `try_retire`.
     #[inline]
-    pub unsafe fn try_retire(&self, local_batch: *mut LocalBatch, thread: Thread) {
+    pub unsafe fn try_retire(
+        &self,
+        local_batch: *mut LocalBatches,
+        reservation: &mut Reservation,
+        thread: Thread,
+    ) {
         // Establish a total order between the retirement of nodes in this batch and
         // light stores marking a thread as active, or active in an epoch:
         // - If the store comes first, we will see that the thread is active.
@@ -475,7 +504,7 @@ impl Collector {
         let batch = unsafe { (*local_batch).batch };
 
         // There is nothing to retire.
-        if batch.is_null() || batch == LocalBatch::DROP {
+        if batch.is_null() || batch == LocalBatches::DROP {
             return;
         }
 
@@ -490,6 +519,8 @@ impl Collector {
         // ensure we have enough entries for reservation lists, as the number of threads
         // can grow dynamically.
         for reservation in self.reservations.iter() {
+            let reservation = unsafe { &(*reservation).value };
+
             // If we don't have enough entries to insert into the reservation lists
             // of all active threads, try again later.
             //
@@ -597,7 +628,7 @@ impl Collector {
             atomic::fence(Ordering::Acquire);
 
             // Reset the batch.
-            unsafe { *local_batch = LocalBatch::default() };
+            unsafe { *local_batch = LocalBatches::default() };
 
             // Safety: The reference count is zero, meaning that either no threads were
             // active or they have all already decremented the reference count.
@@ -605,12 +636,14 @@ impl Collector {
             // Additionally, the local batch has been reset and we are not holding on to any
             // mutable references, so any recursive calls to retire during
             // reclamation are valid.
-            unsafe { Collector::free_batch(batch) }
+            unsafe {
+                (*local_batch).free(batch, reservation);
+            }
             return;
         }
 
         // Reset the batch.
-        unsafe { *local_batch = LocalBatch::default() };
+        unsafe { *local_batch = LocalBatches::default() };
     }
 
     /// Traverse the reservation list, decrementing the reference count of each
@@ -621,7 +654,7 @@ impl Collector {
     /// `list` must be a valid reservation list.
     #[cold]
     #[inline(never)]
-    unsafe fn traverse(mut list: *mut Entry) {
+    unsafe fn traverse(&self, mut list: *mut Entry, reservation: &mut Reservation) {
         while !list.is_null() {
             let curr = list;
 
@@ -640,9 +673,58 @@ impl Collector {
 
                     // Safety: We have the last reference to the batch and it has been removed
                     // from our reservation list.
-                    Collector::free_batch(batch)
+                    let batch = Box::from_raw(batch);
+                    reservation
+                        .free_batches
+                        .push_back(VecDeque::from(batch.entries));
                 }
             }
+        }
+    }
+
+    /// Steal a single object from a local batch.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe to call concurrently with the same `thread`.
+    #[inline]
+    pub unsafe fn try_steal(&self, reservation: &mut Reservation) -> Option<Entry> {
+        if reservation.free_batches.is_empty() {
+            return None;
+        }
+
+        let birth_epoch = self.birth_epoch(reservation);
+
+        let batch = unsafe { reservation.free_batches.front_mut().unwrap_unchecked() };
+        let entry = unsafe { batch.pop_front().unwrap_unchecked() };
+
+        unsafe { (*entry.node).birth_epoch = birth_epoch }
+
+        if batch.is_empty() {
+            drop(reservation.free_batches.pop_front());
+        }
+
+        Some(entry)
+    }
+
+    /// Free a single object from a local batch.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe to call concurrently with the same `thread`.
+    #[inline]
+    pub unsafe fn free_one(&self, reservation: &mut Reservation) {
+        let Some(batch) = reservation.free_batches.front_mut() else {
+            return;
+        };
+
+        let entry = unsafe { batch.pop_front().unwrap_unchecked() };
+
+        // Safety: We have the last reference to the batch.
+        unsafe { (entry.reclaim)(entry.node.cast::<Link>()) };
+
+        if batch.is_empty() {
+            drop(reservation.free_batches.pop_front());
         }
     }
 
@@ -656,7 +738,7 @@ impl Collector {
     #[inline]
     pub unsafe fn reclaim_all(&self) {
         for local_batch in self.batches.iter() {
-            let local_batch = local_batch.value.get();
+            let local_batch = unsafe { addr_of_mut!((*local_batch).value) };
 
             unsafe {
                 let batch = (*local_batch).batch;
@@ -667,13 +749,32 @@ impl Collector {
                 }
 
                 // Tell any recursive calls to `retire` to reclaim immediately.
-                (*local_batch).batch = LocalBatch::DROP;
+                (*local_batch).batch = LocalBatches::DROP;
 
                 // Safety: we have `&mut self` and the batch is non-null.
-                Collector::free_batch(batch);
+                for entry in (*batch).entries.iter_mut() {
+                    (entry.reclaim)(entry.node.cast::<Link>());
+                }
+
+                let _ = Box::from_raw(batch);
 
                 // Reset the batch.
                 (*local_batch).batch = ptr::null_mut();
+            }
+        }
+    }
+
+    /// Free a batch of objects.
+    ///
+    /// # Safety
+    ///
+    /// This method is not safe to call concurrently with the same `thread`.
+    #[inline]
+    pub unsafe fn free_local_batches(&self, reservation: &mut Reservation) {
+        for batch in reservation.free_batches.drain(..) {
+            // Safety: We have the last reference to the batch.
+            for entry in batch {
+                unsafe { (entry.reclaim)(entry.node.cast::<Link>()) };
             }
         }
     }
@@ -687,13 +788,17 @@ impl Collector {
     /// as recursive calls to retire may still access the local batch. The
     /// batch being retired must be unreachable through any recursive calls.
     #[inline]
-    unsafe fn free_batch(batch: *mut Batch) {
+    unsafe fn free_batch(
+        local_batch: &mut LocalBatches,
+        reservation: &mut Reservation,
+        batch: *mut Batch,
+    ) {
         // Safety: We have the last reference to the batch.
         for entry in unsafe { (*batch).entries.iter_mut() } {
             unsafe { (entry.reclaim)(entry.node.cast::<Link>()) };
         }
 
-        unsafe { LocalBatch::free(batch) };
+        unsafe { local_batch.free(batch, reservation) }
     }
 }
 
@@ -732,21 +837,30 @@ pub struct Reservation {
     /// The epoch this thread last accessed a pointer in.
     epoch: AtomicU64,
     /// The number of active guards for this thread.
-    pub guards: Cell<u64>,
+    pub guards: u64,
     /// A lock used for owned guards to prevent concurrent operations.
     pub lock: Mutex<()>,
+    pub reclaim_tick: usize,
     /// The number of nodes allocated by this thread.
-    node_count: Cell<u64>,
+    node_count: u64,
+
+    cached_batches: Vec<*mut Batch>,
+    free_batches: VecDeque<VecDeque<Entry>>,
 }
+
+unsafe impl Send for Reservation {}
 
 impl Default for Reservation {
     fn default() -> Self {
         Reservation {
             head: AtomicPtr::new(Entry::INACTIVE),
             epoch: AtomicU64::new(0),
-            guards: Cell::new(0),
+            guards: 0,
             lock: Mutex::new(()),
-            node_count: Cell::new(0),
+            reclaim_tick: 0,
+            node_count: 0,
+            cached_batches: Vec::new(),
+            free_batches: VecDeque::new(),
         }
     }
 }
@@ -773,14 +887,20 @@ impl Batch {
             active: AtomicUsize::new(0),
         }
     }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.min_epoch = 0;
+        *self.active.get_mut() = 0;
+    }
 }
 
 /// A retired object.
-struct Entry {
+pub struct Entry {
     /// Object metadata.
-    node: *mut Node,
+    pub(crate) node: *mut Node,
     /// The function used to reclaim this object.
-    reclaim: unsafe fn(*mut Link),
+    pub(crate) reclaim: unsafe fn(*mut Link),
     /// The batch this node is a part of.
     batch: *mut Batch,
 }
@@ -794,26 +914,26 @@ impl Entry {
 }
 
 /// A pointer to a batch, unique to the current thread.
-pub struct LocalBatch {
+pub struct LocalBatches {
     batch: *mut Batch,
 }
 
-impl Default for LocalBatch {
+impl Default for LocalBatches {
     fn default() -> Self {
-        LocalBatch {
+        LocalBatches {
             batch: ptr::null_mut(),
         }
     }
 }
 
-impl LocalBatch {
+impl LocalBatches {
     /// This is set during a call to reclaim_all, signalling recursive calls to
     /// retire to reclaim immediately.
     const DROP: *mut Batch = usize::MAX as _;
 
     /// Return a pointer to the batch, initializing it if the batch was null.
     #[inline]
-    fn get_or_init(&mut self, capacity: usize) -> *mut Batch {
+    fn get_or_init(&mut self, reservation: &mut Reservation, capacity: usize) -> *mut Batch {
         if self.batch.is_null() {
             self.batch = Box::into_raw(Box::new(Batch::new(capacity)));
         }
@@ -823,11 +943,13 @@ impl LocalBatch {
 
     /// Free the batch.
     #[inline]
-    unsafe fn free(ptr: *mut Batch) {
+    unsafe fn free(&mut self, ptr: *mut Batch, reservation: &mut Reservation) {
+        //unsafe { (*ptr).clear() }
+        //reservation.cached_batches.push(ptr);
         unsafe { drop(Box::from_raw(ptr)) }
     }
 }
 
 /// Local batches are only accessed by the current thread.
-unsafe impl Send for LocalBatch {}
-unsafe impl Sync for LocalBatch {}
+unsafe impl Send for LocalBatches {}
+unsafe impl Sync for LocalBatches {}

@@ -7,12 +7,16 @@ const THREADS: usize = 16;
 const ITEMS: usize = 1000;
 
 fn treiber_stack(c: &mut Criterion) {
-    c.bench_function("trieber_stack-haphazard", |b| {
-        b.iter(run::<haphazard_stack::TreiberStack<usize>>)
-    });
+    // c.bench_function("trieber_stack-haphazard", |b| {
+    //     b.iter(run::<haphazard_stack::TreiberStack<usize>>)
+    // });
 
-    c.bench_function("trieber_stack-crossbeam", |b| {
-        b.iter(run::<crossbeam_stack::TreiberStack<usize>>)
+    // c.bench_function("trieber_stack-crossbeam", |b| {
+    //     b.iter(run::<crossbeam_stack::TreiberStack<usize>>)
+    // });
+
+    c.bench_function("trieber_stack-seize", |b| {
+        b.iter(run::<seize_stack::TreiberStack<usize>>)
     });
 
     c.bench_function("trieber_stack-seize", |b| {
@@ -89,17 +93,23 @@ mod seize_stack {
         fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new().epoch_frequency(None),
+                collector: Collector::new().epoch_frequency(None).batch_size(128),
             }
         }
 
         fn push(&self, value: T) {
-            let node = self.collector.link_boxed(Node {
-                data: ManuallyDrop::new(value),
-                next: ptr::null_mut(),
-            });
-
             let guard = self.collector.enter();
+
+            let node = match guard.try_steal(&self.collector) {
+                Some(stolen) => stolen.link().cast::<Linked<Node<T>>>(),
+                None => Box::into_raw(Box::new(Linked {
+                    value: Node {
+                        data: ManuallyDrop::new(value),
+                        next: ptr::null_mut(),
+                    },
+                    link: guard.link(&self.collector),
+                })),
+            };
 
             loop {
                 let head = guard.protect(&self.head, Ordering::Relaxed);

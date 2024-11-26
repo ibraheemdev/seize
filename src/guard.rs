@@ -3,6 +3,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use crate::collector::Stolen;
 use crate::raw::Reservation;
 use crate::tls::Thread;
 use crate::{AsLink, Collector, Link};
@@ -99,6 +100,9 @@ pub trait Guard {
     /// This is identical to [`Collector::link`], but may have slightly less
     /// overhead due to the existence of a guard.
     fn link(&self, collector: &Collector) -> Link;
+
+    /// Steal a single object from a local batch.
+    fn try_steal(&self, collector: &Collector) -> Option<Stolen>;
 }
 
 /// A guard that keeps the current thread marked as active.
@@ -115,7 +119,7 @@ pub struct LocalGuard<'a> {
     // The current thread.
     thread: Thread,
     // The reservation of the current thread.
-    reservation: *const Reservation,
+    reservation: *mut Reservation,
     // `LocalGuard` not be `Send or Sync` as we are tied to the state of the
     // current thread in the collector.
     _unsend: PhantomData<*mut ()>,
@@ -130,12 +134,13 @@ impl LocalGuard<'_> {
 
         // Calls to `enter` may be reentrant, so we need to keep track of the number
         // of active guards for the current thread.
-        let guards = reservation.guards.get();
-        reservation.guards.set(guards + 1);
+        unsafe {
+            (*reservation).guards += 1;
 
-        if guards == 0 {
-            // Safety: Only called on the current thread, which is currently inactive.
-            unsafe { collector.raw.enter(reservation) };
+            if (*reservation).guards == 1 {
+                // Safety: Only called on the current thread, which is currently inactive.
+                collector.raw.enter(&mut *reservation)
+            }
         }
 
         LocalGuard {
@@ -159,20 +164,26 @@ impl Guard for LocalGuard<'_> {
     /// it.
     #[inline]
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &mut *self.reservation };
+
         // Safety:
         // - `self.thread` is the current thread.
         // - The validity of the pointer is guaranteed by the caller.
-        unsafe { self.collector.raw.add(ptr, reclaim, self.thread) }
+        unsafe {
+            self.collector
+                .raw
+                .add(ptr, reclaim, reservation, self.thread)
+        }
     }
 
     /// Refreshes the guard.
     #[inline]
     fn refresh(&mut self) {
         // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
-        let guards = reservation.guards.get();
+        let reservation = unsafe { &mut *self.reservation };
 
-        if guards == 1 {
+        if reservation.guards == 1 {
             // Safety: We have a unique reference to the last active guard.
             unsafe { self.collector.raw.refresh(reservation) }
         }
@@ -181,11 +192,18 @@ impl Guard for LocalGuard<'_> {
     /// Flush any retired values in the local batch.
     #[inline]
     fn flush(&self) {
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &mut *self.reservation };
+
         // Note that this does not actually retire any values, it just attempts
         // to add the batch to any active reservations lists, including ours.
         //
         // Safety: `self.thread` is the current thread.
-        unsafe { self.collector.raw.try_retire_batch(self.thread) }
+        unsafe {
+            self.collector
+                .raw
+                .try_retire_batch(reservation, self.thread)
+        }
     }
 
     /// Returns a numeric identifier for the current thread.
@@ -203,11 +221,22 @@ impl Guard for LocalGuard<'_> {
     #[inline]
     fn link(&self, collector: &Collector) -> Link {
         // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
+        let reservation = unsafe { &mut *self.reservation };
 
         Link {
             node: UnsafeCell::new(collector.raw.node(reservation)),
         }
+    }
+
+    #[inline]
+    fn try_steal(&self, collector: &Collector) -> Option<Stolen> {
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &mut *self.reservation };
+
+        let entry = unsafe { collector.raw.try_steal(reservation)? };
+        reservation.reclaim_tick = 0;
+
+        Some(Stolen { entry })
     }
 }
 
@@ -215,15 +244,21 @@ impl Drop for LocalGuard<'_> {
     #[inline]
     fn drop(&mut self) {
         // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
+        let reservation = unsafe { &mut *self.reservation };
 
         // Decrement the active guard count.
-        let guards = reservation.guards.get();
-        reservation.guards.set(guards - 1);
+        reservation.guards -= 1;
 
-        if guards == 1 {
+        if reservation.guards == 0 {
             // Safety: We have a unique reference to the last active guard.
             unsafe { self.collector.raw.leave(reservation) };
+
+            if reservation.reclaim_tick == self.collector.raw.reclaim_frequency {
+                unsafe { self.collector.raw.free_one(reservation) };
+                reservation.reclaim_tick = 0;
+            } else {
+                reservation.reclaim_tick += 1;
+            }
         }
     }
 }
@@ -251,7 +286,7 @@ pub struct OwnedGuard<'a> {
     // An owned thread, unique to this guard.
     thread: Thread,
     // The reservation of this guard.
-    reservation: *const Reservation,
+    reservation: *mut Reservation,
 }
 
 // Safety: `OwnedGuard` owns its thread slot, so is not tied to any
@@ -269,7 +304,7 @@ impl OwnedGuard<'_> {
         let reservation = unsafe { collector.raw.reservation(thread) };
 
         // Safety: We have ownership of `reservation`.
-        unsafe { collector.raw.enter(reservation) };
+        unsafe { collector.raw.enter(&mut *reservation) };
 
         OwnedGuard {
             collector,
@@ -292,38 +327,46 @@ impl Guard for OwnedGuard<'_> {
     /// it.
     #[inline]
     unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
-        let _lock = reservation.lock.lock().unwrap();
+        let _lock = unsafe { (*self.reservation).lock.lock().unwrap() };
+        // Safety: We hold the lock.
+        let reservation = unsafe { &mut *self.reservation };
 
         // Safety:
         // - We hold the lock and so have unique access to the batch.
         // - The validity of the pointer is guaranteed by the caller.
-        unsafe { self.collector.raw.add(ptr, reclaim, self.thread) }
+        unsafe {
+            self.collector
+                .raw
+                .add(ptr, reclaim, reservation, self.thread)
+        }
     }
 
     /// Refreshes the guard.
     #[inline]
     fn refresh(&mut self) {
+        let _lock = unsafe { (*self.reservation).lock.lock().unwrap() };
+        // Safety: We hold the lock.
+        let reservation = unsafe { &mut *self.reservation };
+
         // Safety: We have `&mut self` and ownership of the thread.
-        unsafe {
-            self.collector
-                .raw
-                .refresh(self.collector.raw.reservation(self.thread))
-        }
+        unsafe { self.collector.raw.refresh(reservation) }
     }
 
     /// Flush any retired values in the local batch.
     #[inline]
     fn flush(&self) {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
-        let _lock = reservation.lock.lock().unwrap();
+        let _lock = unsafe { (*self.reservation).lock.lock().unwrap() };
+        // Safety: We hold the lock.
+        let reservation = unsafe { &mut *self.reservation };
         // Note that this does not actually retire any values, it just attempts
         // to add the batch to any active reservations lists, including ours.
         //
         // Safety: We hold the lock and so have unique access to the batch.
-        unsafe { self.collector.raw.try_retire_batch(self.thread) }
+        unsafe {
+            self.collector
+                .raw
+                .try_retire_batch(reservation, self.thread)
+        }
     }
 
     /// Returns a numeric identifier for the current thread.
@@ -344,26 +387,38 @@ impl Guard for OwnedGuard<'_> {
 
     #[inline]
     fn link(&self, collector: &Collector) -> Link {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
+        let _lock = unsafe { (*self.reservation).lock.lock().unwrap() };
+        // Safety: We hold the lock.
+        let reservation = unsafe { &mut *self.reservation };
 
         Link {
             node: UnsafeCell::new(collector.raw.node(reservation)),
         }
+    }
+
+    #[inline]
+    fn try_steal(&self, collector: &Collector) -> Option<Stolen> {
+        let _lock = unsafe { (*self.reservation).lock.lock().unwrap() };
+        // Safety: We hold the lock.
+        let reservation = unsafe { &mut *self.reservation };
+
+        let entry = unsafe { collector.raw.try_steal(reservation)? };
+
+        Some(Stolen { entry })
     }
 }
 
 impl Drop for OwnedGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
+        // Safety: We have `&mut self`.
+        let reservation = unsafe { &mut *self.reservation };
 
-        // Safety: `self.thread` is an owned thread.
-        unsafe { self.collector.raw.leave(reservation) };
-
-        // Safety: We are in `drop` and never share `self.thread`.
-        unsafe { Thread::free(self.thread.id) };
+        unsafe {
+            self.collector.raw.leave(reservation);
+            self.collector.raw.free_local_batches(reservation);
+            Thread::free(self.thread.id);
+        }
     }
 }
 
@@ -431,5 +486,10 @@ impl Guard for UnprotectedGuard {
     #[inline]
     fn link(&self, collector: &Collector) -> Link {
         collector.link()
+    }
+
+    #[inline]
+    fn try_steal(&self, _collector: &Collector) -> Option<Stolen> {
+        None
     }
 }

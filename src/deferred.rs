@@ -114,9 +114,14 @@ impl Deferred {
     ///
     /// [`Collector::retire`]: crate::Collector::retire
     pub unsafe fn retire_all(&mut self, collector: &Collector, reclaim: unsafe fn(*mut Link)) {
+        let current = Thread::current();
+
+        // Safety: Accessing the reservation of the current thread is always valid.
+        let reservation = unsafe { &mut *collector.raw.reservation(current) };
+
         // Note that `add_batch` doesn't ever actually reclaim the pointer immediately
         // if the current thread is active, similar to `retire`.
-        unsafe { collector.raw.add_batch(self, reclaim, Thread::current()) }
+        unsafe { collector.raw.add_batch(self, reclaim, reservation, current) }
     }
 
     /// Run a function for each object in the batch.
