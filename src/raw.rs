@@ -67,6 +67,16 @@ impl Collector {
         self
     }
 
+    /// Returns the birth epoch for a new node, without incrementing
+    /// allocation counters.
+    pub fn birth_epoch(&self) -> u64 {
+        if self.epoch_frequency.is_some() {
+            self.epoch.load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
     /// Create a new node.
     ///
     /// # Safety

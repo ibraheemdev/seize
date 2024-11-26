@@ -3,7 +3,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::raw::Reservation;
+use crate::raw::{self, Reservation};
 use crate::tls::Thread;
 use crate::{AsLink, Collector, Link};
 
@@ -305,12 +305,9 @@ impl Guard for OwnedGuard<'_> {
     /// Refreshes the guard.
     #[inline]
     fn refresh(&mut self) {
-        // Safety: We have `&mut self` and ownership of the thread.
-        unsafe {
-            self.collector
-                .raw
-                .refresh(self.collector.raw.reservation(self.thread))
-        }
+        // Safety: `self.reservation` is owned by the current thread.
+        let reservation = unsafe { &*self.reservation };
+        unsafe { self.collector.raw.refresh(reservation) }
     }
 
     /// Flush any retired values in the local batch.
@@ -343,12 +340,14 @@ impl Guard for OwnedGuard<'_> {
     }
 
     #[inline]
-    fn link(&self, collector: &Collector) -> Link {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
+    fn link(&self, _collector: &Collector) -> Link {
+        // Avoid going through shared thread local storage.
+        let node = raw::Node {
+            birth_epoch: self.collector.raw.birth_epoch(),
+        };
 
         Link {
-            node: UnsafeCell::new(collector.raw.node(reservation)),
+            node: UnsafeCell::new(node),
         }
     }
 }
