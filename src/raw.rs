@@ -60,13 +60,6 @@ impl Collector {
         }
     }
 
-    /// Sets the number of values that must be in a batch
-    /// before reclamation is attempted.
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size.next_power_of_two();
-        self
-    }
-
     /// Returns the birth epoch for a new node, without incrementing
     /// allocation counters.
     pub fn birth_epoch(&self) -> u64 {
@@ -376,7 +369,7 @@ impl Collector {
         };
 
         // Attempt to retire the batch if we have enough entries.
-        if len & (self.batch_size - 1) == 0 {
+        if len >= self.batch_size {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
             unsafe { self.try_retire(local_batch, thread) }
@@ -409,11 +402,10 @@ impl Collector {
             return;
         }
 
-        let mut should_retire = false;
         let min_epoch = *deferred.min_epoch.get_mut();
 
         // Safety: The deferred and local batch are both valid for mutable access.
-        unsafe {
+        let len = unsafe {
             // Keep track of the oldest node in the batch.
             (*batch).min_epoch = (*batch).min_epoch.min(min_epoch);
 
@@ -424,17 +416,13 @@ impl Collector {
                     reclaim,
                     batch,
                 });
-
-                // We want to keep retirement amortized consistently, so only retire if we
-                // reach a multiple of the batch size
-                if (*batch).entries.len() & (self.batch_size - 1) == 0 {
-                    should_retire = true;
-                }
             });
-        }
+
+            (*batch).entries.len()
+        };
 
         // Attempt to retire the batch if we have enough entries.
-        if should_retire {
+        if len >= self.batch_size {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
             unsafe { self.try_retire(local_batch, thread) }

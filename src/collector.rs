@@ -80,11 +80,9 @@ impl Collector {
     /// than the number of threads accessing objects.
     ///
     /// The default batch size is `32`.
-    pub fn batch_size(self, batch_size: usize) -> Self {
-        Self {
-            id: self.id,
-            raw: self.raw.batch_size(batch_size),
-        }
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.raw.batch_size = batch_size;
+        self
     }
 
     /// Marks the current thread as active, returning a guard
