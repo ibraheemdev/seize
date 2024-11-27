@@ -330,7 +330,7 @@ mod linux {
 
 #[cfg(all(target_os = "windows", feature = "fast-barrier", not(miri)))]
 mod windows {
-    use core::sync::atomic;
+    use core::sync::atomic::{self, Ordering};
     use windows_sys;
 
     pub fn detect() {}
@@ -346,7 +346,7 @@ mod windows {
     /// Issues a light memory barrier for a preceding store operation.
     #[inline]
     pub fn light_store_barrier() {
-        atomic::compiler_fence(atomic::Ordering::SeqCst);
+        atomic::compiler_fence(Ordering::SeqCst);
     }
 
     /// The ordering for a load operation that synchronizes with heavy barriers.
@@ -360,7 +360,7 @@ mod windows {
     /// Issues a light memory barrier for a preceding load operation.
     #[inline]
     pub fn light_load_barrier() {
-        atomic::compiler_fence(atomic::Ordering::SeqCst);
+        atomic::compiler_fence(Ordering::SeqCst);
     }
 
     /// Issues a heavy memory barrier for slow path that synchronizes with light stores.
