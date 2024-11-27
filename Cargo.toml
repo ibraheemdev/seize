@@ -17,7 +17,7 @@ libc = { version = "0.2", optional = true }
 windows-sys = { version = "0.52", features = ["Win32_System_Threading"], optional = true }
 
 [features]
-default = ["fast-barrier"]
+# default = ["fast-barrier"]
 
 # Enables runtime detection of fast memory barriers on Linux and Windows.
 fast-barrier = ["windows-sys", "libc"]
