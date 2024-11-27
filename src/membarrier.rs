@@ -220,7 +220,7 @@ mod linux {
         use std::cell::UnsafeCell;
         use std::mem::MaybeUninit;
         use std::ptr;
-        use std::sync::{atomic, LazyLock};
+        use std::sync::{atomic, OnceLock};
 
         struct Barrier {
             lock: UnsafeCell<libc::pthread_mutex_t>,
@@ -268,50 +268,7 @@ mod linux {
 
         /// An alternative solution to `sys_membarrier` that works on older Linux kernels and
         /// x86/x86-64 systems.
-        static BARRIER: LazyLock<Barrier> = LazyLock::new(|| {
-            unsafe {
-                // Find out the page size on the current system.
-                let page_size = libc::sysconf(libc::_SC_PAGESIZE);
-                fatal_assert!(page_size > 0);
-                let page_size = page_size as libc::size_t;
-
-                // Create a dummy page.
-                let page = libc::mmap(
-                    ptr::null_mut(),
-                    page_size,
-                    libc::PROT_NONE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1 as libc::c_int,
-                    0 as libc::off_t,
-                );
-                fatal_assert!(page != libc::MAP_FAILED);
-                fatal_assert!(page as libc::size_t % page_size == 0);
-
-                // Locking the page ensures that it stays in memory during the two mprotect
-                // calls in `Barrier::barrier()`. If the page was unmapped between those calls,
-                // they would not have the expected effect of generating IPI.
-                libc::mlock(page, page_size as libc::size_t);
-
-                // Initialize the mutex.
-                let lock = UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER);
-                let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
-                fatal_assert!(libc::pthread_mutexattr_init(attr.as_mut_ptr()) == 0);
-                let mut attr = attr.assume_init();
-                fatal_assert!(
-                    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_NORMAL) == 0
-                );
-                fatal_assert!(libc::pthread_mutex_init(lock.get(), &attr) == 0);
-                fatal_assert!(libc::pthread_mutexattr_destroy(&mut attr) == 0);
-
-                let page = page as u64;
-
-                Barrier {
-                    lock,
-                    page,
-                    page_size,
-                }
-            }
-        });
+        static BARRIER: OnceLock<Barrier> = OnceLock::new();
 
         /// Returns `true` if the `mprotect`-based trick is supported.
         pub fn is_supported() -> bool {
@@ -321,7 +278,52 @@ mod linux {
         /// Executes a heavy `mprotect`-based barrier.
         #[inline]
         pub fn barrier() {
-            BARRIER.barrier();
+            let barrier = BARRIER.get_or_init(|| {
+                unsafe {
+                    // Find out the page size on the current system.
+                    let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+                    fatal_assert!(page_size > 0);
+                    let page_size = page_size as libc::size_t;
+
+                    // Create a dummy page.
+                    let page = libc::mmap(
+                        ptr::null_mut(),
+                        page_size,
+                        libc::PROT_NONE,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                        -1 as libc::c_int,
+                        0 as libc::off_t,
+                    );
+                    fatal_assert!(page != libc::MAP_FAILED);
+                    fatal_assert!(page as libc::size_t % page_size == 0);
+
+                    // Locking the page ensures that it stays in memory during the two mprotect
+                    // calls in `Barrier::barrier()`. If the page was unmapped between those calls,
+                    // they would not have the expected effect of generating IPI.
+                    libc::mlock(page, page_size as libc::size_t);
+
+                    // Initialize the mutex.
+                    let lock = UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER);
+                    let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
+                    fatal_assert!(libc::pthread_mutexattr_init(attr.as_mut_ptr()) == 0);
+                    let mut attr = attr.assume_init();
+                    fatal_assert!(
+                        libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_NORMAL) == 0
+                    );
+                    fatal_assert!(libc::pthread_mutex_init(lock.get(), &attr) == 0);
+                    fatal_assert!(libc::pthread_mutexattr_destroy(&mut attr) == 0);
+
+                    let page = page as u64;
+
+                    Barrier {
+                        lock,
+                        page,
+                        page_size,
+                    }
+                }
+            });
+
+            barrier.barrier();
         }
     }
 }
