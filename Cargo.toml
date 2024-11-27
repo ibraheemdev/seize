@@ -6,8 +6,9 @@ license = "MIT"
 authors = ["Ibraheem Ahmed <ibraheem@ibraheem.ca>"]
 description = "Fast, efficient, and robust memory reclamation for concurrent data structures."
 repository = "https://github.com/ibraheemdev/seize"
-keywords = ["lock-free", "atomic", "garbage"]
+keywords = ["lock-free", "rcu", "atomic", "garbage"]
 categories = ["concurrency", "memory-management"]
+rust-version = "1.72.0"
 
 [dependencies]
 libc = { version = "0.2", optional = true }
