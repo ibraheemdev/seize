@@ -471,6 +471,7 @@ impl Collector {
 
         // Safety: Local batches are only accessed by the current thread.
         let batch = unsafe { (*local_batch).batch };
+        let min_epoch = unsafe { (*batch).min_epoch };
 
         // There is nothing to retire.
         if batch.is_null() || batch == LocalBatch::DROP {
@@ -520,7 +521,7 @@ impl Collector {
             //
             // If epoch tracking is disabled this is always false (0 < 0).
             if !ptr::eq(reservation, current_reservation)
-                && reservation.epoch.load(Ordering::Relaxed) < unsafe { (*batch).min_epoch }
+                && reservation.epoch.load(Ordering::Relaxed) < min_epoch
             {
                 continue;
             }
