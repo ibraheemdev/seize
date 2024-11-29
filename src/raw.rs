@@ -474,7 +474,6 @@ impl Collector {
 
         // Safety: Local batches are only accessed by the current thread.
         let batch = unsafe { (*local_batch).batch };
-        let min_epoch = unsafe { (*batch).min_epoch };
 
         // There is nothing to retire.
         if batch.is_null() || batch == LocalBatch::DROP {
@@ -482,9 +481,11 @@ impl Collector {
         }
 
         // Safety: The batch is non-null.
+        let min_epoch = unsafe { (*batch).min_epoch };
         let batch_entries = unsafe { (*batch).entries.as_mut_ptr() };
-        let current_reservation = self.reservations.load(thread);
+
         let mut marked = 0;
+        let current_reservation = self.reservations.load(thread);
 
         // Record all active threads, including the current thread.
         //
