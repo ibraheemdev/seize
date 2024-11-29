@@ -153,7 +153,11 @@ impl Collector {
     pub unsafe fn protect_local<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
-            let value = ptr.load(membarrier::light_load());
+            //
+            // We use `SeqCst` unconditionally because it is equivalent to `Acquire` on
+            // most platforms, and the minimum ordering depends on the membarrier strategy,
+            // so checking is not worth it.
+            let value = ptr.load(Ordering::SeqCst);
 
             // The light barrier ensures that this load participates in the total order.
             // See `enter` for details.
@@ -168,12 +172,11 @@ impl Collector {
         let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
 
         loop {
-            // Note that this ordering is guaranteed to be at least `Acquire`. We
-            // need to record at least the birth epoch to let other threads know we
-            // are accessing this pointer. Note that this requires the pointer to have
-            // been stored with `Release` ordering, which is technically undocumented.
+            // Acquire: We need to record at least the birth epoch to let other threads
+            // know we are accessing this pointer. Note that this requires the pointer to
+            // have been stored with `Release` ordering, which is technically undocumented.
             // However, any `Relaxed` stores would be unsound to access anyways.
-            let ptr = ptr.load(membarrier::light_load());
+            let ptr = ptr.load(Ordering::SeqCst);
 
             // The light barrier ensures that this load participates in the total order.
             // See `enter` for details.
@@ -215,7 +218,7 @@ impl Collector {
     pub fn protect<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
         if self.epoch_frequency.is_none() {
             // Epoch tracking is disabled.
-            let value = ptr.load(membarrier::light_load());
+            let value = ptr.load(Ordering::SeqCst);
 
             // The light barrier ensures that this load participates in the total order.
             // See `enter` for details.
@@ -234,9 +237,9 @@ impl Collector {
         membarrier::light_load_barrier();
 
         loop {
-            // The light ordering is guaranteed to be at least `Acquire`, ensuring that
-            // we acquire the birth epoch of this pointer. See `protect_local` for details.
-            let ptr = ptr.load(membarrier::light_load());
+            // Acquire: acquire the birth epoch of this pointer. See `protect_local`
+            // for details.
+            let ptr = ptr.load(Ordering::SeqCst);
 
             // The light barrier ensures that this load participates in the total order.
             // See `enter` for details.

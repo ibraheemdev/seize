@@ -52,8 +52,6 @@ mod default {
     }
 
     /// The ordering for a load operation that synchronizes with heavy barriers.
-    ///
-    /// This is guaranteed to be at least `Acquire`.
     #[inline]
     pub fn light_load() -> Ordering {
         // Participate in the total order established by light and heavy `SeqCst` barriers.
@@ -92,16 +90,10 @@ mod linux {
     /// Issues a light memory barrier for a preceding store operation.
     #[inline]
     pub fn light_store_barrier() {
-        // Issue a compiler fence which disallows compiler optimizations across itself.
-        //
-        // Note that this is already implied by the `SeqCst` stores if using the fallback
-        // strategy.
         atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
     /// The ordering for a load operation that synchronizes with heavy barriers.
-    ///
-    /// This is guaranteed to be at least `Acquire`.
     #[inline]
     pub fn light_load() -> Ordering {
         // There is no difference between `Acquire` and `SeqCst` loads on most platforms, so
@@ -112,7 +104,7 @@ mod linux {
     /// Issues a light memory barrier for a preceding load operation.
     #[inline]
     pub fn light_load_barrier() {
-        // No-op due to unconditional `SeqCst` loads.
+        atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
     /// Issues a heavy memory barrier for slow path.
@@ -350,11 +342,9 @@ mod windows {
     }
 
     /// The ordering for a load operation that synchronizes with heavy barriers.
-    ///
-    /// This is guaranteed to be at least `Acquire`.
     #[inline]
     pub fn light_load() -> Ordering {
-        Ordering::Acquire
+        Ordering::Relaxed
     }
 
     /// Issues a light memory barrier for a preceding load operation.
