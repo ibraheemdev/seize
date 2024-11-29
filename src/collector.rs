@@ -21,7 +21,7 @@ unsafe impl Send for Collector {}
 unsafe impl Sync for Collector {}
 
 impl Collector {
-    const DEFAULT_BATCH_SIZE: usize = 32;
+    const DEFAULT_BATCH_SIZE: usize = 64;
     const DEFAULT_EPOCH_TICK: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(110) };
 
     /// Creates a new collector.
