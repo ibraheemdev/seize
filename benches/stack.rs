@@ -68,36 +68,36 @@ criterion_main!(benches);
 
 mod seize_stack {
     use super::Stack;
-    use seize::{reclaim, Collector, Guard, Linked};
+    use seize::{reclaim, Collector, Guard};
     use std::mem::ManuallyDrop;
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicPtr, Ordering};
 
     #[derive(Debug)]
     pub struct TreiberStack<T> {
-        head: AtomicPtr<Linked<Node<T>>>,
+        head: AtomicPtr<Node<T>>,
         collector: Collector,
     }
 
     #[derive(Debug)]
     struct Node<T> {
         data: ManuallyDrop<T>,
-        next: *mut Linked<Node<T>>,
+        next: *mut Node<T>,
     }
 
     impl<T> Stack<T> for TreiberStack<T> {
         fn new() -> TreiberStack<T> {
             TreiberStack {
                 head: AtomicPtr::new(ptr::null_mut()),
-                collector: Collector::new().epoch_frequency(None),
+                collector: Collector::new().batch_size(32),
             }
         }
 
         fn push(&self, value: T) {
-            let node = self.collector.link_boxed(Node {
+            let node = Box::into_raw(Box::new(Node {
                 data: ManuallyDrop::new(value),
                 next: ptr::null_mut(),
-            });
+            }));
 
             let guard = self.collector.enter();
 
@@ -130,8 +130,7 @@ mod seize_stack {
                 {
                     unsafe {
                         let data = ptr::read(&(*head).data);
-                        self.collector
-                            .retire(head, reclaim::boxed::<Linked<Node<T>>>);
+                        guard.defer_retire(head, reclaim::boxed::<Node<T>>);
                         return Some(ManuallyDrop::into_inner(data));
                     }
                 }

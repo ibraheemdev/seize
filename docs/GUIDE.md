@@ -2,16 +2,16 @@ A quick-start guide for working with `seize`.
 
 # Introduction
 
-Seize tries to stay out of your way as much as possible. It works with raw
+seize tries to stay out of your way as much as possible. It works with raw
 pointers directly instead of creating safe wrapper types that end up being a
 hassle to work with in practice. Below is a step-by-step guide on how to get
 started. We'll be writing a stack that implements concurrent `push` and `pop`
 operations. The details of how the stack works are not directly relevant, the
-guide will instead focus on how Seize works generally.
+guide will instead focus on how seize works generally.
 
 # Collectors
 
-Seize avoids the use of global state and encourages creating a designated
+seize avoids the use of global state and encourages creating a designated
 _collector_ per data structure. Collectors allow you to allocate, protect, and
 retire objects.
 
@@ -34,7 +34,7 @@ impl<T> Stack<T> {
 
 # Allocating Objects
 
-Seize requires storing some metadata about the global epoch for each object that
+seize requires storing some metadata about the global epoch for each object that
 is allocated. Because of this, objects in a concurrent data structure that may be
 reclaimed must embed the `Link` type or use the `Linked<T>` wrapper provided for
 convenience. See [DST Support](#dst-support) for more details.

@@ -1,9 +1,7 @@
 use crate::tls::Thread;
 use crate::{membarrier, raw, LocalGuard, OwnedGuard};
 
-use std::cell::UnsafeCell;
 use std::fmt;
-use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Fast, efficient, and robust memory reclamation.
@@ -22,7 +20,6 @@ unsafe impl Sync for Collector {}
 
 impl Collector {
     const DEFAULT_BATCH_SIZE: usize = 32;
-    const DEFAULT_EPOCH_TICK: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(110) };
 
     /// Creates a new collector.
     pub fn new() -> Self {
@@ -36,30 +33,9 @@ impl Collector {
         let batch_size = cpus.max(Self::DEFAULT_BATCH_SIZE);
 
         Self {
-            raw: raw::Collector::new(cpus, Self::DEFAULT_EPOCH_TICK, batch_size),
+            raw: raw::Collector::new(cpus, batch_size),
             id: ID.fetch_add(1, Ordering::Relaxed),
         }
-    }
-
-    /// Sets the frequency of epoch advancement.
-    ///
-    /// Seize uses epochs to protect against stalled threads.
-    /// The more frequently the epoch is advanced, the faster
-    /// stalled threads can be detected. However, it also means
-    /// that threads will have to do work to catch up to the
-    /// current epoch more often.
-    ///
-    /// The default epoch frequency is `110`, meaning that
-    /// the epoch will advance after every 110 values are
-    /// linked to the collector. Benchmarking has shown that
-    /// this is a good tradeoff between throughput and memory
-    /// efficiency.
-    ///
-    /// If `None` is passed epoch tracking, and protection
-    /// against stalled threads, will be disabled completely.
-    pub fn epoch_frequency(mut self, n: Option<NonZeroU64>) -> Self {
-        self.raw.epoch_frequency = n;
-        self
     }
 
     /// Sets the number of values that must be in a batch
@@ -156,58 +132,6 @@ impl Collector {
         OwnedGuard::enter(self)
     }
 
-    /// Create a [`Link`] that can be used to link an object to the collector.
-    ///
-    /// This method is useful when working with a DST where the [`Linked`]
-    /// wrapper cannot be used. See [`AsLink`] for details, or use the
-    /// [`link_value`](Collector::link_value)
-    /// and [`link_boxed`](Collector::link_boxed) helpers.
-    #[inline]
-    pub fn link(&self) -> Link {
-        // Safety: Accessing the reservation of the current thread is always valid.
-        let reservation = unsafe { self.raw.reservation(Thread::current()) };
-
-        Link {
-            node: UnsafeCell::new(self.raw.node(reservation)),
-        }
-    }
-
-    /// Creates a new `Linked` object with the given value.
-    ///
-    /// This is equivalent to:
-    ///
-    /// ```ignore
-    /// Linked {
-    ///     value,
-    ///     link: collector.link()
-    /// }
-    /// ```
-    #[inline]
-    pub fn link_value<T>(&self, value: T) -> Linked<T> {
-        Linked {
-            link: self.link(),
-            value,
-        }
-    }
-
-    /// Links a value to the collector and allocates it with `Box`.
-    ///
-    /// This is equivalent to:
-    ///
-    /// ```ignore
-    /// Box::into_raw(Box::new(Linked {
-    ///     value,
-    ///     link: collector.link()
-    /// }))
-    /// ```
-    #[inline]
-    pub fn link_boxed<T>(&self, value: T) -> *mut Linked<T> {
-        Box::into_raw(Box::new(Linked {
-            link: self.link(),
-            value,
-        }))
-    }
-
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
     ///
@@ -271,7 +195,7 @@ impl Collector {
     /// }
     /// ```
     #[inline]
-    pub unsafe fn retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
+    pub unsafe fn retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         // Note that `add` doesn't ever actually reclaim the pointer immediately if
@@ -315,9 +239,7 @@ impl Clone for Collector {
     /// Creates a new, independent collector with the same configuration as this
     /// one.
     fn clone(&self) -> Self {
-        Collector::new()
-            .batch_size(self.raw.batch_size)
-            .epoch_frequency(self.raw.epoch_frequency)
+        Collector::new().batch_size(self.raw.batch_size)
     }
 }
 
@@ -329,126 +251,8 @@ impl Default for Collector {
 
 impl fmt::Debug for Collector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut f = f.debug_struct("Collector");
-
-        if self.raw.epoch_frequency.is_some() {
-            f.field("epoch", &self.raw.epoch.load(Ordering::Acquire));
-        }
-
-        f.field("batch_size", &self.raw.batch_size)
-            .field("epoch_frequency", &self.raw.epoch_frequency)
+        f.debug_struct("Collector")
+            .field("batch_size", &self.raw.batch_size)
             .finish()
-    }
-}
-
-/// A link to the collector.
-///
-/// Functions passed to [`retire`](Collector::retire) are called with a
-/// type-erased `Link` pointer. To extract the underlying value from a link,
-/// you can call the [`cast`](Link::cast) method.
-#[repr(transparent)]
-pub struct Link {
-    #[allow(dead_code)]
-    pub(crate) node: UnsafeCell<raw::Node>,
-}
-
-impl Link {
-    /// Cast this `link` to it's underlying type.
-    ///
-    /// Note that while this function is safe, using the returned
-    /// pointer is only sound if the link is in fact a type-erased `T`.
-    /// This means that when casting a link in a reclaimer, the value
-    /// that was retired must be of type `T`.
-    #[inline]
-    pub fn cast<T: AsLink>(link: *mut Link) -> *mut T {
-        link.cast()
-    }
-}
-
-/// A type that can be pointer-cast to and from a [`Link`].
-///
-/// Most types can avoid this trait and work instead with the [`Linked`]
-/// wrapper type. However, if you want more control over the layout of your
-/// type (i.e. are working with a DST), you may need to implement this trait
-/// directly.
-///
-/// # Safety
-///
-/// Types implementing this trait must be marked `#[repr(C)]`
-/// and have a [`Link`] as their **first** field.
-///
-/// # Examples
-///
-/// ```rust
-/// use seize::{AsLink, Collector, Link};
-///
-/// #[repr(C)]
-/// struct Bytes {
-///     // safety invariant: Link must be the first field
-///     link: Link,
-///     values: [*mut u8; 0],
-/// }
-///
-/// // Safety: Bytes is repr(C) and has Link as it's first field
-/// unsafe impl AsLink for Bytes {}
-///
-/// // Deallocate an `Bytes`.
-/// unsafe fn dealloc(ptr: *mut Bytes, collector: &Collector) {
-///     collector.retire(ptr, |link| {
-///         // safety `ptr` is of type *mut Bytes
-///         let link: *mut Bytes = Link::cast(link);
-///         // ..
-///     });
-/// }
-/// ```
-pub unsafe trait AsLink {}
-
-/// A value linked to a collector.
-///
-/// Objects that may be retired must embed the [`Link`] type. This is a
-/// convenience wrapper for linked values that can be created with the
-/// [`Collector::link_value`] or [`Collector::link_boxed`] methods.
-#[repr(C)]
-pub struct Linked<T> {
-    pub link: Link, // Safety Invariant: this field must come first
-    pub value: T,
-}
-
-unsafe impl<T> AsLink for Linked<T> {}
-
-impl<T: PartialEq> PartialEq for Linked<T> {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
-    }
-}
-
-impl<T: Eq> Eq for Linked<T> {}
-
-impl<T: fmt::Debug> fmt::Debug for Linked<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.value)
-    }
-}
-
-impl<T: fmt::Display> fmt::Display for Linked<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.value)
-    }
-}
-
-impl<T> std::ops::Deref for Linked<T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
-
-impl<T> std::ops::DerefMut for Linked<T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
     }
 }
