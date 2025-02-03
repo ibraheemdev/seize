@@ -1,11 +1,10 @@
-use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::raw::{self, Reservation};
+use crate::raw::Reservation;
 use crate::tls::Thread;
-use crate::{AsLink, Collector, Link};
+use crate::Collector;
 
 /// A guard that enables protected loads of concurrent objects.
 ///
@@ -57,7 +56,7 @@ pub trait Guard {
     /// but a raw pointer is returned for convenience. Data structures that
     /// return shared references to values should ensure that the lifetime
     /// of the reference is tied to the lifetime of a guard.
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T;
+    fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T;
 
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
@@ -77,7 +76,7 @@ pub trait Guard {
     /// Additionally, the pointer must be valid to access as a [`Link`], per the
     /// [`AsLink`] trait, and the reclaimer passed to `retire` must
     /// correctly free values of type `T`.
-    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link));
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ()));
 
     /// Returns a numeric identifier for the current thread.
     ///
@@ -93,12 +92,6 @@ pub trait Guard {
     /// This can be used to verify that user-provided guards are valid
     /// for the expected collector.
     fn belongs_to(&self, collector: &Collector) -> bool;
-
-    /// Create a [`Link`] that can be used to link an object to the collector.
-    ///
-    /// This is identical to [`Collector::link`], but may have slightly less
-    /// overhead due to the existence of a guard.
-    fn link(&self, collector: &Collector) -> Link;
 }
 
 /// A guard that keeps the current thread marked as active.
@@ -150,15 +143,14 @@ impl LocalGuard<'_> {
 impl Guard for LocalGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
-        // Safety: `self.reservation` is owned by the current thread.
-        unsafe { self.collector.raw.protect_local(ptr, &*self.reservation) }
+    fn protect<T>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
+        self.collector.raw.protect(ptr)
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
     #[inline]
-    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
         // Safety:
         // - `self.thread` is the current thread.
         // - The validity of the pointer is guaranteed by the caller.
@@ -198,16 +190,6 @@ impl Guard for LocalGuard<'_> {
     #[inline]
     fn belongs_to(&self, collector: &Collector) -> bool {
         Collector::id_eq(self.collector, collector)
-    }
-
-    #[inline]
-    fn link(&self, collector: &Collector) -> Link {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
-
-        Link {
-            node: UnsafeCell::new(collector.raw.node(reservation)),
-        }
     }
 }
 
@@ -282,16 +264,14 @@ impl OwnedGuard<'_> {
 impl Guard for OwnedGuard<'_> {
     /// Protects the load of an atomic pointer.
     #[inline]
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
-        // Safety: `self.reservation` is owned by the current thread.
-        let reservation = unsafe { &*self.reservation };
-        self.collector.raw.protect(ptr, reservation)
+    fn protect<T>(&self, ptr: &AtomicPtr<T>, _: Ordering) -> *mut T {
+        self.collector.raw.protect(ptr)
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
     #[inline]
-    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
         // Safety: `self.reservation` is owned by the current thread.
         let reservation = unsafe { &*self.reservation };
         let _lock = reservation.lock.lock().unwrap();
@@ -337,18 +317,6 @@ impl Guard for OwnedGuard<'_> {
     #[inline]
     fn belongs_to(&self, collector: &Collector) -> bool {
         Collector::id_eq(self.collector, collector)
-    }
-
-    #[inline]
-    fn link(&self, _collector: &Collector) -> Link {
-        // Avoid going through shared thread local storage.
-        let node = raw::Node {
-            birth_epoch: self.collector.raw.birth_epoch(),
-        };
-
-        Link {
-            node: UnsafeCell::new(node),
-        }
     }
 }
 
@@ -396,14 +364,14 @@ pub struct UnprotectedGuard;
 impl Guard for UnprotectedGuard {
     /// Loads the pointer directly, using the given ordering.
     #[inline]
-    fn protect<T: AsLink>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
+    fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
         ptr.load(ordering)
     }
 
     /// Reclaims the pointer immediately.
     #[inline]
-    unsafe fn defer_retire<T: AsLink>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link)) {
-        unsafe { reclaim(ptr.cast::<Link>()) }
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
+        unsafe { reclaim(ptr.cast()) }
     }
 
     /// This method is a no-op.
@@ -425,10 +393,5 @@ impl Guard for UnprotectedGuard {
     #[inline]
     fn belongs_to(&self, _collector: &Collector) -> bool {
         true
-    }
-
-    #[inline]
-    fn link(&self, collector: &Collector) -> Link {
-        collector.link()
     }
 }

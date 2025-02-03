@@ -12,6 +12,7 @@
 //! total order, X is ordered before Y with respect to coherence only if either X or Y is
 //! a heavy barrier. In other words, there is no way to establish an ordering between light
 //! barriers without the presence of a heavy barrier.
+#![allow(dead_code)]
 
 #[cfg(all(target_os = "linux", feature = "fast-barrier", not(miri)))]
 pub use linux::*;

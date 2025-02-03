@@ -3,7 +3,6 @@
 #![doc = include_str!("../README.md")]
 
 mod collector;
-mod deferred;
 mod guard;
 mod membarrier;
 mod raw;
@@ -13,6 +12,5 @@ mod utils;
 pub mod guide;
 pub mod reclaim;
 
-pub use collector::{AsLink, Collector, Link, Linked};
-pub use deferred::Deferred;
+pub use collector::Collector;
 pub use guard::{unprotected, Guard, LocalGuard, OwnedGuard, UnprotectedGuard};

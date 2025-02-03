@@ -1,7 +1,6 @@
-use seize::{reclaim, Collector, Deferred, Guard, Linked};
+use seize::{reclaim, Collector, Guard};
 
 use std::mem::ManuallyDrop;
-use std::num::NonZeroU64;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, OnceLock};
@@ -13,6 +12,10 @@ impl Drop for DropTrack {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn boxed<T>(value: T) -> *mut T {
+    Box::into_raw(Box::new(value))
 }
 
 struct UnsafeSend<T>(T);
@@ -27,7 +30,7 @@ fn single_thread() {
     let items = cfg::ITEMS & !1;
 
     for _ in 0..items {
-        let zero = AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone())));
+        let zero = AtomicPtr::new(boxed(DropTrack(dropped.clone())));
 
         {
             let guard = collector.enter();
@@ -37,7 +40,7 @@ fn single_thread() {
         {
             let guard = collector.enter();
             let value = guard.protect(&zero, Ordering::Acquire);
-            unsafe { collector.retire(value, reclaim::boxed::<Linked<DropTrack>>) }
+            unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
         }
     }
 
@@ -53,9 +56,7 @@ fn two_threads() {
 
     let (tx, rx) = mpsc::channel();
 
-    let one = Arc::new(AtomicPtr::new(
-        collector.link_boxed(DropTrack(a_dropped.clone())),
-    ));
+    let one = Arc::new(AtomicPtr::new(boxed(DropTrack(a_dropped.clone()))));
 
     let h = thread::spawn({
         let one = one.clone();
@@ -71,16 +72,16 @@ fn two_threads() {
     });
 
     for _ in 0..2 {
-        let zero = AtomicPtr::new(collector.link_boxed(DropTrack(b_dropped.clone())));
+        let zero = AtomicPtr::new(boxed(DropTrack(b_dropped.clone())));
         let guard = collector.enter();
         let value = guard.protect(&zero, Ordering::Acquire);
-        unsafe { collector.retire(value, reclaim::boxed::<Linked<DropTrack>>) }
+        unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
     }
 
     rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
     let value = guard.protect(&one, Ordering::Acquire);
-    unsafe { collector.retire(value, reclaim::boxed::<Linked<DropTrack>>) }
+    unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
 
     rx.recv().unwrap(); // wait for thread to drop guard
     h.join().unwrap();
@@ -101,7 +102,7 @@ fn refresh() {
     let collector = Arc::new(Collector::new().batch_size(3));
 
     let items = (0..cfg::ITEMS)
-        .map(|i| AtomicPtr::new(collector.link_boxed(i)))
+        .map(|i| AtomicPtr::new(boxed(i)))
         .collect::<Arc<[_]>>();
 
     let handles = (0..cfg::THREADS)
@@ -116,7 +117,7 @@ fn refresh() {
                     for _ in 0..cfg::ITER {
                         for item in items.iter() {
                             let item = guard.protect(item, Ordering::Acquire);
-                            unsafe { assert!(**item < cfg::ITEMS) }
+                            unsafe { assert!(*item < cfg::ITEMS) }
                         }
 
                         guard.refresh();
@@ -128,8 +129,8 @@ fn refresh() {
 
     for i in 0..cfg::ITER {
         for item in items.iter() {
-            let old = item.swap(collector.link_boxed(i), Ordering::AcqRel);
-            unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
+            let old = item.swap(Box::into_raw(Box::new(i)), Ordering::AcqRel);
+            unsafe { collector.retire(old, reclaim::boxed::<usize>) }
         }
     }
 
@@ -140,7 +141,7 @@ fn refresh() {
     // cleanup
     for item in items.iter() {
         let old = item.swap(ptr::null_mut(), Ordering::Acquire);
-        unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) }
+        unsafe { collector.retire(old, reclaim::boxed::<usize>) }
     }
 }
 
@@ -153,19 +154,19 @@ fn recursive_retire() {
 
     struct Recursive {
         _value: usize,
-        pointers: Vec<*mut Linked<usize>>,
+        pointers: Vec<*mut usize>,
     }
 
-    let ptr = collector().link_boxed(Recursive {
+    let ptr = boxed(Recursive {
         _value: 0,
-        pointers: (0..cfg::ITEMS).map(|i| collector().link_boxed(i)).collect(),
+        pointers: (0..cfg::ITEMS).map(boxed).collect(),
     });
 
     unsafe {
         collector().retire(ptr, |link| {
-            let value = Box::from_raw(link.cast::<Linked<Recursive>>());
-            for pointer in value.value.pointers {
-                collector().retire(pointer, reclaim::boxed::<Linked<usize>>);
+            let value = Box::from_raw(link.cast::<Recursive>());
+            for pointer in value.pointers {
+                collector().retire(pointer, reclaim::boxed::<usize>);
                 let mut guard = collector().enter();
                 guard.flush();
                 guard.refresh();
@@ -185,16 +186,11 @@ fn reclaim_all() {
         let dropped = Arc::new(AtomicUsize::new(0));
 
         let items = (0..cfg::ITEMS)
-            .map(|_| AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone()))))
+            .map(|_| AtomicPtr::new(boxed(DropTrack(dropped.clone()))))
             .collect::<Vec<_>>();
 
         for item in items {
-            unsafe {
-                collector.retire(
-                    item.load(Ordering::Relaxed),
-                    reclaim::boxed::<Linked<DropTrack>>,
-                )
-            };
+            unsafe { collector.retire(item.load(Ordering::Relaxed), reclaim::boxed::<DropTrack>) };
         }
 
         unsafe { collector.reclaim_all() };
@@ -207,7 +203,7 @@ fn recursive_retire_reclaim_all() {
     struct Recursive {
         _value: usize,
         collector: *mut Collector,
-        pointers: Vec<*mut Linked<DropTrack>>,
+        pointers: Vec<*mut DropTrack>,
     }
 
     unsafe {
@@ -215,19 +211,19 @@ fn recursive_retire_reclaim_all() {
         let collector = Box::into_raw(Box::new(Collector::new().batch_size(cfg::ITEMS * 2)));
         let dropped = Arc::new(AtomicUsize::new(0));
 
-        let ptr = (*collector).link_boxed(Recursive {
+        let ptr = boxed(Recursive {
             _value: 0,
             collector,
             pointers: (0..cfg::ITEMS)
-                .map(|_| (*collector).link_boxed(DropTrack(dropped.clone())))
+                .map(|_| boxed(DropTrack(dropped.clone())))
                 .collect(),
         });
 
         (*collector).retire(ptr, |link| {
-            let value = Box::from_raw(link.cast::<Linked<Recursive>>());
-            let collector = value.value.collector;
-            for pointer in value.value.pointers {
-                (*collector).retire(pointer, reclaim::boxed::<Linked<DropTrack>>);
+            let value = Box::from_raw(link.cast::<Recursive>());
+            let collector = value.collector;
+            for pointer in value.pointers {
+                (*collector).retire(pointer, reclaim::boxed::<DropTrack>);
             }
         });
 
@@ -238,95 +234,16 @@ fn recursive_retire_reclaim_all() {
 }
 
 #[test]
-fn deferred() {
-    let collector = Arc::new(Collector::new().batch_size(2));
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let items = cfg::ITEMS & !1;
-
-    let mut batch = Deferred::new();
-    let guard = collector.enter();
-    for _ in 0..items {
-        let zero = AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone())));
-        let value = guard.protect(&zero, Ordering::Acquire);
-        unsafe { batch.defer(value) };
-    }
-
-    assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<DropTrack>>) };
-    // guard is still active
-    assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    drop(guard);
-    // now everything should be retired
-    assert_eq!(dropped.load(Ordering::Relaxed), items);
-}
-
-#[test]
-fn deferred_concurrent() {
-    let collector = Arc::new(Collector::new().batch_size(3));
-
-    let items = (0..cfg::ITEMS)
-        .map(|i| AtomicPtr::new(collector.link_boxed(i)))
-        .collect::<Arc<[_]>>();
-
-    let handles = (0..cfg::THREADS)
-        .map(|_| {
-            thread::spawn({
-                let items = items.clone();
-                let collector = collector.clone();
-
-                move || {
-                    let mut guard = collector.enter();
-
-                    for _ in 0..cfg::ITER {
-                        for item in items.iter() {
-                            let item = guard.protect(item, Ordering::Acquire);
-                            unsafe { assert!(**item < cfg::ITEMS) }
-                        }
-
-                        guard.refresh();
-                    }
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    for i in 0..cfg::ITER {
-        let mut batch = Deferred::new();
-        for item in items.iter() {
-            let old = item.swap(collector.link_boxed(i), Ordering::AcqRel);
-            unsafe { batch.defer(old) };
-        }
-
-        // retire all items
-        unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<usize>>) }
-    }
-
-    for handle in handles {
-        handle.join().unwrap()
-    }
-
-    // cleanup
-    let mut batch = Deferred::new();
-    for item in items.iter() {
-        let old = item.swap(ptr::null_mut(), Ordering::Acquire);
-        unsafe { batch.defer(old) };
-    }
-    unsafe { batch.retire_all(&collector, reclaim::boxed::<Linked<usize>>) }
-}
-
-#[test]
 fn defer_retire() {
     let collector = Collector::new().batch_size(5);
     let dropped = Arc::new(AtomicUsize::new(0));
 
-    let objects: Vec<_> = (0..30)
-        .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
-        .collect();
+    let objects: Vec<_> = (0..30).map(|_| boxed(DropTrack(dropped.clone()))).collect();
 
     let guard = collector.enter();
 
     for object in objects {
-        unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
+        unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
         guard.flush();
     }
 
@@ -339,14 +256,11 @@ fn defer_retire() {
 
 #[test]
 fn reentrant() {
-    let collector = Arc::new(Collector::new().batch_size(5).epoch_frequency(None));
+    let collector = Arc::new(Collector::new().batch_size(5));
     let dropped = Arc::new(AtomicUsize::new(0));
 
-    let objects: UnsafeSend<Vec<_>> = UnsafeSend(
-        (0..5)
-            .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
-            .collect(),
-    );
+    let objects: UnsafeSend<Vec<_>> =
+        UnsafeSend((0..5).map(|_| boxed(DropTrack(dropped.clone()))).collect());
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
@@ -360,7 +274,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
     })
@@ -377,11 +291,8 @@ fn reentrant() {
 
     let dropped = Arc::new(AtomicUsize::new(0));
 
-    let objects: UnsafeSend<Vec<_>> = UnsafeSend(
-        (0..5)
-            .map(|_| collector.link_boxed(DropTrack(dropped.clone())))
-            .collect(),
-    );
+    let objects: UnsafeSend<Vec<_>> =
+        UnsafeSend((0..5).map(|_| boxed(DropTrack(dropped.clone()))).collect());
 
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
 
@@ -395,7 +306,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<Linked<DropTrack>>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
             }
         }
     })
@@ -421,7 +332,7 @@ fn owned_guard() {
 
     let objects = UnsafeSend(
         (0..5)
-            .map(|_| AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone()))))
+            .map(|_| AtomicPtr::new(boxed(DropTrack(dropped.clone()))))
             .collect::<Vec<_>>(),
     );
 
@@ -433,10 +344,7 @@ fn owned_guard() {
         let guard2 = collector.enter();
         for object in objects.0.iter() {
             unsafe {
-                guard2.defer_retire(
-                    object.load(Ordering::Acquire),
-                    reclaim::boxed::<Linked<DropTrack>>,
-                )
+                guard2.defer_retire(object.load(Ordering::Acquire), reclaim::boxed::<DropTrack>)
             }
         }
 
@@ -467,7 +375,7 @@ fn owned_guard_concurrent() {
 
     let objects = UnsafeSend(
         (0..cfg::THREADS)
-            .map(|_| AtomicPtr::new(collector.link_boxed(DropTrack(dropped.clone()))))
+            .map(|_| AtomicPtr::new(boxed(DropTrack(dropped.clone()))))
             .collect::<Vec<_>>(),
     );
 
@@ -487,7 +395,7 @@ fn owned_guard_concurrent() {
                 unsafe {
                     guard.defer_retire(
                         objects.0[i].load(Ordering::Acquire),
-                        reclaim::boxed::<Linked<DropTrack>>,
+                        reclaim::boxed::<DropTrack>,
                     )
                 };
 
@@ -604,29 +512,27 @@ fn owned_stress() {
 
 #[derive(Debug)]
 pub struct Stack<T> {
-    head: AtomicPtr<Linked<Node<T>>>,
+    head: AtomicPtr<Node<T>>,
     collector: Collector,
 }
 
 #[derive(Debug)]
 struct Node<T> {
     data: ManuallyDrop<T>,
-    next: *mut Linked<Node<T>>,
+    next: *mut Node<T>,
 }
 
 impl<T> Stack<T> {
     pub fn new(batch_size: usize) -> Stack<T> {
         Stack {
             head: AtomicPtr::new(ptr::null_mut()),
-            collector: Collector::new()
-                .batch_size(batch_size)
-                .epoch_frequency(NonZeroU64::new(1)),
+            collector: Collector::new().batch_size(batch_size),
         }
     }
 
-    pub fn push(&self, t: T, guard: &impl Guard) {
-        let new = self.collector.link_boxed(Node {
-            data: ManuallyDrop::new(t),
+    pub fn push(&self, value: T, guard: &impl Guard) {
+        let new = boxed(Node {
+            data: ManuallyDrop::new(value),
             next: ptr::null_mut(),
         });
 
@@ -661,8 +567,7 @@ impl<T> Stack<T> {
             {
                 unsafe {
                     let data = ptr::read(&(*head).data);
-                    self.collector
-                        .retire(head, reclaim::boxed::<Linked<Node<T>>>);
+                    self.collector.retire(head, reclaim::boxed::<Node<T>>);
                     return Some(ManuallyDrop::into_inner(data));
                 }
             }

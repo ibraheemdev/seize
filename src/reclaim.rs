@@ -7,8 +7,6 @@
 
 use std::ptr;
 
-use crate::{AsLink, Link};
-
 /// Reclaims memory allocated with [`Box`].
 ///
 /// This function calls [`Box::from_raw`] on the linked pointer.
@@ -19,9 +17,9 @@ use crate::{AsLink, Link};
 /// passing this function to [`retire`](crate::Collector::retire).
 /// The value retired must have been of type `T` to be retired through
 /// `boxed::<T>`.
-pub unsafe fn boxed<T: AsLink>(link: *mut Link) {
+pub unsafe fn boxed<T>(link: *mut ()) {
     unsafe {
-        let _: Box<T> = Box::from_raw(Link::cast(link));
+        let _: Box<T> = Box::from_raw(link.cast::<T>());
     }
 }
 
@@ -35,8 +33,8 @@ pub unsafe fn boxed<T: AsLink>(link: *mut Link) {
 /// passing this function to [`retire`](crate::Collector::retire).
 /// The value retired must have been of type `T` to be retired through
 /// `in_place::<T>`.
-pub unsafe fn in_place<T: AsLink>(link: *mut Link) {
+pub unsafe fn in_place<T>(link: *mut ()) {
     unsafe {
-        ptr::drop_in_place::<T>(Link::cast(link));
+        ptr::drop_in_place::<T>(link.cast::<T>());
     }
 }

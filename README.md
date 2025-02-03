@@ -28,7 +28,7 @@ is reduced when only a fraction of threads are writing, degrading memory efficie
 
 ## Implementation
 
-Seize is based on the [hyaline reclamation scheme], which uses reference counting
+seize is based on the [hyaline reclamation scheme], which uses reference counting
 to determine when it is safe to free memory. However, reference counters are only
 used for already retired objects, allowing it to avoid the high overhead incurred
 by traditional reference counting schemes where every memory access requires modifying
@@ -38,8 +38,8 @@ threads have made progress, leading to predictable latency without sacrificing p
 Epochs can also be tracked to protect against stalled threads, making reclamation truly
 lock-free.
 
-Seize provides performance competitive with that of epoch based schemes, while memory efficiency
-is similar to that of hazard pointers. Seize is compatible with all modern hardware that
+seize provides performance competitive with that of epoch based schemes, while memory efficiency
+is similar to that of hazard pointers. seize is compatible with all modern hardware that
 supports single-word atomic operations such as FAA and CAS.
 
 [quick-start guide]: https://docs.rs/seize/latest/seize/guide/index.html

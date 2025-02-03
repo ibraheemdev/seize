@@ -1,45 +1,29 @@
 use crate::membarrier;
 use crate::tls::{Thread, ThreadLocal};
 use crate::utils::CachePadded;
-use crate::{AsLink, Deferred, Link};
 
 use std::cell::{Cell, UnsafeCell};
-use std::num::NonZeroU64;
 use std::ptr;
-use std::sync::atomic::{self, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Fast, lock-free, and robust concurrent memory reclamation.
 ///
 /// The core algorithm is described [in this paper](https://arxiv.org/pdf/2108.02763.pdf).
 pub struct Collector {
-    /// The global epoch value.
-    ///
-    /// The global epoch is used to detect stalled threads. The current epoch
-    /// is recorded on each allocated object as well as every time a thread
-    /// attempts to access a object. This allows retirers to skip threads that
-    /// are lagging behind and could not have accessed a given object.
-    pub(crate) epoch: AtomicU64,
-
     /// Per-thread batches of retired nodes.
     ///
     /// Retired values are added to thread-local batches before starting
-    /// the reclamation process, to amortize the cost of retirement.
+    /// the reclamation process, amortizing the cost of retirement.
     batches: ThreadLocal<CachePadded<UnsafeCell<LocalBatch>>>,
 
     /// Per-thread reservations lists.
     ///
-    /// A reservation list is a list of batches that have been retired
+    /// A reservation list is a list of batches that were retired
     /// while the current thread was active. The thread must decrement
     /// the reference count and potentially free the batch of any
     /// reservations before exiting.
     reservations: ThreadLocal<CachePadded<Reservation>>,
-
-    /// The number of object allocations before advancing the global epoch
-    /// on a given thread.
-    ///
-    /// If this is `None`, epoch tracking is disabled.
-    pub(crate) epoch_frequency: Option<NonZeroU64>,
 
     /// The minimum number of nodes required in a batch before freeing.
     pub(crate) batch_size: usize,
@@ -47,63 +31,12 @@ pub struct Collector {
 
 impl Collector {
     /// Create a collector with the provided configuration.
-    pub fn new(threads: usize, epoch_frequency: NonZeroU64, batch_size: usize) -> Self {
+    pub fn new(threads: usize, batch_size: usize) -> Self {
         Self {
-            // Note the global epoch must start at 1 because thread-local epochs
-            // start at 0. All threads must be forced to synchronize when protecting
-            // objects created in the first epoch.
-            epoch: AtomicU64::new(1),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
-            epoch_frequency: Some(epoch_frequency),
             batch_size: batch_size.next_power_of_two(),
         }
-    }
-
-    /// Returns the birth epoch for a new node, without incrementing
-    /// allocation counters.
-    pub fn birth_epoch(&self) -> u64 {
-        if self.epoch_frequency.is_some() {
-            self.epoch.load(Ordering::Relaxed)
-        } else {
-            0
-        }
-    }
-
-    /// Create a new node.
-    ///
-    /// # Safety
-    ///
-    /// This method is not safe to call concurrently on the same thread.
-    #[inline]
-    pub fn node(&self, reservation: &Reservation) -> Node {
-        // Record the current epoch value.
-        //
-        // Note that it's fine if we see an older epoch, in which case more threads
-        // may be counted as active.
-        let birth_epoch = match self.epoch_frequency {
-            Some(ref frequency) => {
-                // Safety: Node counts are only accessed by the current thread.
-                let count = reservation.node_count.get();
-                reservation.node_count.set(count + 1);
-
-                // Advance the global epoch if we reached the epoch frequency.
-                //
-                // Relaxed: Synchronization only occurs when an epoch is recorded by a
-                // given thread to protect a pointer, not when incrementing the epoch.
-                if count >= frequency.get() {
-                    reservation.node_count.set(0);
-                    self.epoch.fetch_add(1, Ordering::Relaxed) + 1
-                } else {
-                    self.epoch.load(Ordering::Relaxed)
-                }
-            }
-
-            // We aren't tracking epochs.
-            None => 0,
-        };
-
-        Node { birth_epoch }
     }
 
     /// Return the reservation for the current thread.
@@ -145,137 +78,18 @@ impl Collector {
     }
 
     /// Load an atomic pointer.
-    ///
-    /// # Safety
-    ///
-    /// This method must only be called with the reservation of the current thread.
     #[inline]
-    pub unsafe fn protect_local<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
-        if self.epoch_frequency.is_none() {
-            // Epoch tracking is disabled.
-            //
-            // We use `SeqCst` unconditionally because it is equivalent to `Acquire` on
-            // most platforms, and the minimum ordering depends on the membarrier strategy,
-            // so checking is not worth it.
-            let value = ptr.load(Ordering::SeqCst);
+    pub fn protect<T>(&self, ptr: &AtomicPtr<T>) -> *mut T {
+        // We have to respect both the user provided ordering and the ordering required
+        // by the membarrier strategy. `SeqCst` is equivalent to `Acquire` on all (relevant)
+        // platforms, so we just use it unconditionally.
+        let value = ptr.load(Ordering::SeqCst);
 
-            // The light barrier ensures that this load participates in the total order.
-            // See `enter` for details.
-            membarrier::light_load_barrier();
-
-            return value;
-        }
-
-        // Load the last epoch we recorded on this thread.
-        //
-        // Relaxed: The reservation is only modified by the current thread.
-        let mut prev_epoch = reservation.epoch.load(Ordering::Relaxed);
-
-        loop {
-            // Acquire: We need to record at least the birth epoch to let other threads
-            // know we are accessing this pointer. Note that this requires the pointer to
-            // have been stored with `Release` ordering, which is technically undocumented.
-            // However, any `Relaxed` stores would be unsound to access anyways.
-            let ptr = ptr.load(Ordering::SeqCst);
-
-            // The light barrier ensures that this load participates in the total order.
-            // See `enter` for details.
-            membarrier::light_load_barrier();
-
-            // Relaxed: We acquired at least the pointer's birth epoch above, which is the
-            // only epoch we care about.
-            let current_epoch = self.epoch.load(Ordering::Relaxed);
-
-            // We are marked as active in the birth epoch of the pointer we are accessing.
-            // Any threads performing retirement will see that we have access to the pointer
-            // and add to our reservation list.
-            if prev_epoch == current_epoch {
-                return ptr;
-            }
-
-            // Our epoch is out of date, record the new one and try again.
-            reservation
-                .epoch
-                .store(current_epoch, membarrier::light_store());
-
-            // This barrier, combined with the light store above, synchronizes with the heavy
-            // barrier in `retire`:
-            // - If our store comes first, the thread retiring will see that we are active
-            //   in the current epoch.
-            // - If the fence comes first, we will see the new values of any objects being
-            //   retired by that thread.
-            membarrier::light_store_barrier();
-
-            prev_epoch = current_epoch;
-        }
-    }
-
-    /// Load an atomic pointer.
-    ///
-    /// This method is safe to call concurrently from multiple threads with the
-    /// same `thread` object.
-    #[inline]
-    pub fn protect<T>(&self, ptr: &AtomicPtr<T>, reservation: &Reservation) -> *mut T {
-        if self.epoch_frequency.is_none() {
-            // Epoch tracking is disabled.
-            let value = ptr.load(Ordering::SeqCst);
-
-            // The light barrier ensures that this load participates in the total order.
-            // See `enter` for details.
-            membarrier::light_load_barrier();
-
-            return value;
-        }
-
-        // Load the last epoch we recorded for this reservation.
-        let mut prev_epoch = reservation.epoch.load(membarrier::light_load());
-
-        // This epoch may be modified concurrently by other threads. If a different
-        // thread recorded an epoch, we must force this thread to also participate
-        // in the total order and load the new values of any objects that may have
-        // been retired, hence the light barrier.
+        // The light barrier ensures that this load participates in the total order.
+        // See `enter` for details.
         membarrier::light_load_barrier();
 
-        loop {
-            // Acquire: acquire the birth epoch of this pointer. See `protect_local`
-            // for details.
-            let ptr = ptr.load(Ordering::SeqCst);
-
-            // The light barrier ensures that this load participates in the total order.
-            // See `enter` for details.
-            membarrier::light_load_barrier();
-
-            // Relaxed: We acquired at least the pointer's birth epoch above, which is the
-            // only epoch we care about.
-            let current_epoch = self.epoch.load(Ordering::Relaxed);
-
-            // We are marked as active in the birth epoch of the pointer we are accessing.
-            // Any threads performing retirement will see that we have access to the pointer
-            // and add to our reservation list.
-            if prev_epoch == current_epoch {
-                return ptr;
-            }
-
-            // Our epoch is out of date, record the new one and try again.
-            //
-            // Note that this may be called concurrently, so the `fetch_max` ensures we
-            // never overwrite a newer epoch.
-            prev_epoch = reservation
-                .epoch
-                .fetch_max(current_epoch, membarrier::light_store())
-                .max(current_epoch);
-
-            // This barrier, combined with the light store above, synchronizes with the heavy
-            // barrier in `retire`:
-            // - If our store comes first, the thread retiring will see that we are active
-            //   in the current epoch.
-            // - If the fence comes first, we will see the new values of any objects being
-            //   retired by that thread.
-            //
-            // If a different thread beats us and writes a newer epoch, this implies a light load
-            // barrier that ensures that we still participate in the total order.
-            membarrier::light_store_barrier();
-        }
+        return value;
     }
 
     /// Mark the current thread as inactive.
@@ -283,8 +97,8 @@ impl Collector {
     /// # Safety
     ///
     /// Any previously protected pointers may be invalidated after calling
-    /// `leave`. Additionally, method is not safe to call concurrently with
-    /// the same reservation.
+    /// `leave`. Additionally, this method is not safe to call concurrently
+    /// with the same reservation.
     #[inline]
     pub unsafe fn leave(&self, reservation: &Reservation) {
         // Release: Exit the critical section, ensuring that any pointer accesses
@@ -306,13 +120,11 @@ impl Collector {
     /// # Safety
     ///
     /// Any previously protected pointers may be invalidated after calling
-    /// `leave`. Additionally, method is not safe to call concurrently with
+    /// `leave`. Additionally, this method is not safe to call concurrently with
     /// the same reservation.
     #[inline]
     pub unsafe fn refresh(&self, reservation: &Reservation) {
-        // This stores acts as a combined call to `leave` and `enter`.
-        //
-        // SeqCst: Establish the same ordering as `enter` and `leave`.
+        // SeqCst: Establish the ordering of a combined call to `leave` and `enter`.
         let head = reservation.head.swap(ptr::null_mut(), Ordering::SeqCst);
 
         if head != Entry::INACTIVE {
@@ -330,10 +142,7 @@ impl Collector {
     /// inactive threads. Additionally, this method is not safe to call
     /// concurrently with the same `thread`.
     #[inline]
-    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut Link), thread: Thread)
-    where
-        T: AsLink,
-    {
+    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ()), thread: Thread) {
         let local_batch = self.batches.load(thread).get();
 
         // Safety: Local batches are only accessed by the current thread.
@@ -342,30 +151,20 @@ impl Collector {
         // If we are in a recursive call during `drop` or `reclaim_all`, reclaim the
         // object immediately.
         if batch == LocalBatch::DROP {
-            unsafe { reclaim(ptr.cast::<Link>()) }
+            unsafe { reclaim(ptr.cast()) }
             return;
         }
-
-        // `ptr` is guaranteed to be a valid pointer that can be cast to a node
-        // (because of `T: AsLink`).
-        //
-        // Any other thread with a reference to the pointer only has a shared reference
-        // to the `UnsafeCell<Node>`, which is allowed to alias. The caller guarantees
-        // that the same pointer is not retired twice, so we can safely write to the
-        // node through the shared pointer.
-        let node = UnsafeCell::raw_get(ptr.cast::<UnsafeCell<Node>>());
 
         // Safety: The node and batch are both valid for mutable access.
         let len = unsafe {
-            // Keep track of the oldest node in the batch.
-            let birth_epoch = (*node).birth_epoch;
-            (*batch).min_epoch = (*batch).min_epoch.min(birth_epoch);
-
             // Create an entry for this node.
             (*batch).entries.push(Entry {
-                node,
-                reclaim,
                 batch,
+                reclaim,
+                ptr: ptr.cast(),
+                state: EntryState {
+                    head: ptr::null_mut(),
+                },
             });
 
             (*batch).entries.len()
@@ -375,60 +174,7 @@ impl Collector {
         if len >= self.batch_size {
             // Safety: The caller guarantees that this method is not called concurrently
             // with the same `thread` and we are not holding on to any mutable references.
-            unsafe { self.try_retire(local_batch, thread) }
-        }
-    }
-
-    // Retire a batch of nodes.
-    //
-    // # Safety
-    //
-    // The batch must no longer accessible to any inactive threads.
-    /// Additionally, this method is not safe to call concurrently with the same
-    /// `thread`.
-    #[inline]
-    pub unsafe fn add_batch(
-        &self,
-        deferred: &mut Deferred,
-        reclaim: unsafe fn(*mut Link),
-        thread: Thread,
-    ) {
-        let local_batch = self.batches.load(thread).get();
-
-        // Safety: Local batches are only accessed by the current thread.
-        let batch = unsafe { (*local_batch).get_or_init(self.batch_size) };
-
-        // If we are in a recursive call during `drop` or `reclaim_all`, reclaim the
-        // batch immediately.
-        if batch == LocalBatch::DROP {
-            deferred.for_each(|ptr| unsafe { reclaim(ptr.cast::<Link>()) });
-            return;
-        }
-
-        let min_epoch = *deferred.min_epoch.get_mut();
-
-        // Safety: The deferred and local batch are both valid for mutable access.
-        let len = unsafe {
-            // Keep track of the oldest node in the batch.
-            (*batch).min_epoch = (*batch).min_epoch.min(min_epoch);
-
-            deferred.for_each(|node| {
-                // Create an entry for this node.
-                (*batch).entries.push(Entry {
-                    node,
-                    reclaim,
-                    batch,
-                });
-            });
-
-            (*batch).entries.len()
-        };
-
-        // Attempt to retire the batch if we have enough entries.
-        if len >= self.batch_size {
-            // Safety: The caller guarantees that this method is not called concurrently
-            // with the same `thread` and we are not holding on to any mutable references.
-            unsafe { self.try_retire(local_batch, thread) }
+            unsafe { self.try_retire(local_batch) }
         }
     }
 
@@ -441,9 +187,9 @@ impl Collector {
     pub unsafe fn try_retire_batch(&self, thread: Thread) {
         let local_batch = self.batches.load(thread).get();
 
-        // Safety: caller guarantees this method is not called concurrently with the
-        // same `thread`.
-        unsafe { self.try_retire(local_batch, thread) }
+        // Safety: The caller guarantees this method is not called concurrently
+        // with the same `thread`.
+        unsafe { self.try_retire(local_batch) }
     }
 
     /// Attempt to retire objects in this batch.
@@ -458,9 +204,9 @@ impl Collector {
     /// references the the local batch, as they may be invalidated by
     /// recursive calls to `try_retire`.
     #[inline]
-    pub unsafe fn try_retire(&self, local_batch: *mut LocalBatch, thread: Thread) {
+    pub unsafe fn try_retire(&self, local_batch: *mut LocalBatch) {
         // Establish a total order between the retirement of nodes in this batch and
-        // light stores marking a thread as active, or active in an epoch:
+        // light stores marking a thread as active:
         // - If the store comes first, we will see that the thread is active.
         // - If this barrier comes first, the thread will see the new values of any
         //   objects in this batch.
@@ -480,12 +226,9 @@ impl Collector {
             return;
         }
 
-        // Safety: The batch is non-null.
-        let min_epoch = unsafe { (*batch).min_epoch };
         let batch_entries = unsafe { (*batch).entries.as_mut_ptr() };
 
         let mut marked = 0;
-        let current_reservation = self.reservations.load(thread);
 
         // Record all active threads, including the current thread.
         //
@@ -493,14 +236,6 @@ impl Collector {
         // ensure we have enough entries for reservation lists, as the number of threads
         // can grow dynamically.
         for reservation in self.reservations.iter() {
-            // If we don't have enough entries to insert into the reservation lists
-            // of all active threads, try again later.
-            //
-            // Safety: Local batch pointers are valid until relamation.
-            let Some(entry) = unsafe { &(*batch).entries }.get(marked) else {
-                return;
-            };
-
             // If this thread is inactive, we can skip it. The heavy barrier above
             // ensurse that the next time it becomes active, it will see the new
             // values of any objects in this batch.
@@ -510,31 +245,19 @@ impl Collector {
                 continue;
             }
 
-            // If this thread's epoch is behind the earliest birth epoch in this batch
-            // we can skip it, as there is no way it could have accessed any of the objects
-            // in this batch.  The heavy barrier above ensures that the next time it attempts
-            // to access an object in this batch in `protect`, it will see it's new value.
+            // If we don't have enough entries to insert into the reservation lists
+            // of all active threads, try again later.
             //
-            // We make sure never to skip the current thread even if it's epoch is behind
-            // because it may still have access to the pointer. The current thread is only
-            // skipped if there is no active guard.
-            //
-            // Relaxed: We already ensured that we will see the relevant epoch through the
-            // heavy barrier above. If the epoch is behind there is nothing to synchronize
-            // with.
-            //
-            // If epoch tracking is disabled this is always false (0 < 0).
-            if !ptr::eq(reservation, current_reservation)
-                && reservation.epoch.load(Ordering::Relaxed) < min_epoch
-            {
-                continue;
-            }
+            // Safety: Local batch pointers are valid until relamation.
+            let Some(entry) = unsafe { &mut (*batch).entries }.get_mut(marked) else {
+                return;
+            };
 
             // Temporarily store this reservation list in the batch.
             //
             // Safety: All nodes in a batch are valid and this batch has not yet been shared
             // to other threads.
-            unsafe { (*entry.node).head = &reservation.head }
+            entry.state.head = &reservation.head;
             marked += 1;
         }
 
@@ -552,7 +275,7 @@ impl Collector {
 
             // Safety: All nodes in the batch are valid and we just initialized `head` for
             // all `marked` nodes in the loop above.
-            let head = unsafe { &*(*(*curr).node).head };
+            let head = unsafe { &*(*curr).state.head };
 
             // Relaxed: All writes to the `head` use RMW instructions, so the previous node
             // in the list is synchronized through the release sequence on `head`.
@@ -572,7 +295,7 @@ impl Collector {
                 }
 
                 // Link this node to the reservation list.
-                unsafe { (*(*curr).node).next = prev }
+                unsafe { (*curr).state.next = prev }
 
                 // Release the node, as well as the new values of any objects in this batch for
                 // when this thread calls `leave`.
@@ -606,8 +329,7 @@ impl Collector {
             // active or they have all already decremented the reference count.
             //
             // Additionally, the local batch has been reset and we are not holding on to any
-            // mutable references, so any recursive calls to retire during
-            // reclamation are valid.
+            // mutable references, so any recursive calls to retire during reclamation are valid.
             unsafe { Collector::free_batch(batch) }
             return;
         }
@@ -630,7 +352,7 @@ impl Collector {
 
             // Advance the cursor.
             // Safety: `curr` is a valid, non-null node in the list.
-            list = unsafe { (*(*curr).node).next };
+            list = unsafe { (*curr).state.next };
             let batch = unsafe { (*curr).batch };
 
             // Safety: Batch pointers are valid for reads until they are freed.
@@ -693,7 +415,7 @@ impl Collector {
     unsafe fn free_batch(batch: *mut Batch) {
         // Safety: We have the last reference to the batch.
         for entry in unsafe { (*batch).entries.iter_mut() } {
-            unsafe { (entry.reclaim)(entry.node.cast::<Link>()) };
+            unsafe { (entry.reclaim)(entry.ptr.cast()) };
         }
 
         unsafe { LocalBatch::free(batch) };
@@ -708,22 +430,6 @@ impl Drop for Collector {
     }
 }
 
-/// A node attached to every allocated object.
-///
-/// Nodes keep track of their birth epoch and are also used
-/// as links in thread-local reservation lists.
-#[repr(C)]
-pub union Node {
-    // Before retiring: The epoch this node was created in.
-    pub birth_epoch: u64,
-    // While retiring: Temporary location for an active reservation list.
-    head: *const AtomicPtr<Entry>,
-    // After retiring: next node in the thread's reservation list
-    next: *mut Entry,
-    // In deferred batch: next node in the batch
-    pub next_batch: *mut Node,
-}
-
 /// A per-thread reservation list.
 ///
 /// Reservation lists are lists of retired entries, where each entry represents
@@ -732,24 +438,20 @@ pub union Node {
 pub struct Reservation {
     /// The head of the list
     head: AtomicPtr<Entry>,
-    /// The epoch this thread last accessed a pointer in.
-    epoch: AtomicU64,
+
     /// The number of active guards for this thread.
     pub guards: Cell<u64>,
+
     /// A lock used for owned guards to prevent concurrent operations.
     pub lock: Mutex<()>,
-    /// The number of nodes allocated by this thread.
-    node_count: Cell<u64>,
 }
 
 impl Default for Reservation {
     fn default() -> Self {
         Reservation {
             head: AtomicPtr::new(Entry::INACTIVE),
-            epoch: AtomicU64::new(0),
             guards: Cell::new(0),
             lock: Mutex::new(()),
-            node_count: Cell::new(0),
         }
     }
 }
@@ -760,8 +462,7 @@ struct Batch {
     ///
     /// TODO: This allocation could be flattened.
     entries: Vec<Entry>,
-    /// The minimum epoch of all nodes in this batch.
-    min_epoch: u64,
+
     /// The reference count for any active threads.
     active: AtomicUsize,
 }
@@ -772,7 +473,6 @@ impl Batch {
     fn new(capacity: usize) -> Batch {
         Batch {
             entries: Vec::with_capacity(capacity),
-            min_epoch: 0,
             active: AtomicUsize::new(0),
         }
     }
@@ -780,19 +480,34 @@ impl Batch {
 
 /// A retired object.
 struct Entry {
-    /// Object metadata.
-    node: *mut Node,
+    /// The pointer to the object.
+    ptr: *mut (),
+
     /// The function used to reclaim this object.
-    reclaim: unsafe fn(*mut Link),
-    /// The batch this node is a part of.
+    reclaim: unsafe fn(*mut ()),
+
+    /// The state of the retired object.
+    state: EntryState,
+
+    /// The batch that this node is a part of.
     batch: *mut Batch,
+}
+
+/// The state of a retired object.
+#[repr(C)]
+pub union EntryState {
+    // While retiring: Temporary location for an active reservation list.
+    head: *const AtomicPtr<Entry>,
+
+    // After retiring: The next node in the thread's reservation list
+    next: *mut Entry,
 }
 
 impl Entry {
     /// Represents an inactive thread.
     ///
     /// While null indicates an empty list, INACTIVE indicates the thread has no
-    /// active guards and is not accessing any objects.
+    /// active guards and is not currently accessing any objects.
     pub const INACTIVE: *mut Entry = usize::MAX as _;
 }
 
@@ -810,11 +525,11 @@ impl Default for LocalBatch {
 }
 
 impl LocalBatch {
-    /// This is set during a call to reclaim_all, signalling recursive calls to
+    /// This is set during a call to `reclaim_all`, signalling recursive calls to
     /// retire to reclaim immediately.
     const DROP: *mut Batch = usize::MAX as _;
 
-    /// Return a pointer to the batch, initializing it if the batch was null.
+    /// Returns a pointer to the batch, initializing the batch if it was null.
     #[inline]
     fn get_or_init(&mut self, capacity: usize) -> *mut Batch {
         if self.batch.is_null() {
@@ -831,6 +546,6 @@ impl LocalBatch {
     }
 }
 
-/// Local batches are only accessed by the current thread.
+/// Safety: Local batches are only accessed by the current thread.
 unsafe impl Send for LocalBatch {}
 unsafe impl Sync for LocalBatch {}
