@@ -1,6 +1,6 @@
-use crate::membarrier;
-use crate::tls::{Thread, ThreadLocal};
-use crate::utils::CachePadded;
+use super::membarrier;
+use super::tls::{Thread, ThreadLocal};
+use super::utils::CachePadded;
 
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;

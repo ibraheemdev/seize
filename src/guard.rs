@@ -2,8 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::raw::Reservation;
-use crate::tls::Thread;
+use crate::raw::{Reservation, Thread};
 use crate::Collector;
 
 /// A guard that enables protected loads of concurrent objects.
