@@ -1,5 +1,5 @@
-use crate::tls::Thread;
-use crate::{membarrier, raw, LocalGuard, OwnedGuard};
+use crate::raw::{self, membarrier, Thread};
+use crate::{LocalGuard, OwnedGuard};
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};

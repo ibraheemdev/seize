@@ -4,10 +4,7 @@
 
 mod collector;
 mod guard;
-mod membarrier;
 mod raw;
-mod tls;
-mod utils;
 
 pub mod guide;
 pub mod reclaim;
