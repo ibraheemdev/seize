@@ -13,4 +13,4 @@ pub mod guide;
 pub mod reclaim;
 
 pub use collector::Collector;
-pub use guard::{unprotected, Guard, LocalGuard, OwnedGuard, UnprotectedGuard};
+pub use guard::{Guard, LocalGuard, OwnedGuard};
