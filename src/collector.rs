@@ -228,10 +228,15 @@ impl Collector {
     pub unsafe fn reclaim_all(&self) {
         unsafe { self.raw.reclaim_all() };
     }
+}
 
+impl Eq for Collector {}
+
+impl PartialEq for Collector {
+    /// Checks if both references point to the same collector.
     #[inline]
-    pub(crate) fn id_eq(this: &Collector, other: &Collector) -> bool {
-        this.id == other.id
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
 }
 

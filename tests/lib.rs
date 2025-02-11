@@ -415,14 +415,19 @@ fn owned_guard_concurrent() {
 }
 
 #[test]
-fn belongs_to() {
+fn collector_equality() {
     let a = Collector::new();
     let b = Collector::new();
 
-    assert!(a.enter().belongs_to(&a));
-    assert!(!a.enter().belongs_to(&b));
-    assert!(b.enter().belongs_to(&b));
-    assert!(!b.enter().belongs_to(&a));
+    assert_eq!(a, a);
+    assert_eq!(b, b);
+    assert_ne!(a, b);
+
+    assert_eq!(*a.enter().collector(), a);
+    assert_ne!(*a.enter().collector(), b);
+
+    assert_eq!(*b.enter().collector(), b);
+    assert_ne!(*b.enter().collector(), a);
 }
 
 #[test]

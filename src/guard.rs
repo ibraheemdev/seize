@@ -87,11 +87,8 @@ pub trait Guard {
     /// this thread.
     fn thread_id(&self) -> usize;
 
-    /// Returns `true` if this guard belongs to the given collector.
-    ///
-    /// This can be used to verify that user-provided guards are valid
-    /// for the expected collector.
-    fn belongs_to(&self, collector: &Collector) -> bool;
+    /// Returns the collector this guard was created from.
+    fn collector(&self) -> &Collector;
 }
 
 /// A guard that keeps the current thread marked as active.
@@ -186,10 +183,9 @@ impl Guard for LocalGuard<'_> {
         self.thread.id
     }
 
-    /// Returns `true` if this guard belongs to the given collector.
-    #[inline]
-    fn belongs_to(&self, collector: &Collector) -> bool {
-        Collector::id_eq(self.collector, collector)
+    /// Returns the collector this guard was created from.
+    fn collector(&self) -> &Collector {
+        self.collector
     }
 }
 
@@ -313,10 +309,9 @@ impl Guard for OwnedGuard<'_> {
         Thread::current().id
     }
 
-    /// Returns `true` if this guard belongs to the given collector.
-    #[inline]
-    fn belongs_to(&self, collector: &Collector) -> bool {
-        Collector::id_eq(self.collector, collector)
+    /// Returns the collector this guard was created from.
+    fn collector(&self) -> &Collector {
+        self.collector
     }
 }
 
