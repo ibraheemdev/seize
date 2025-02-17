@@ -3,7 +3,7 @@ use seize::{reclaim, Collector, Guard};
 use std::mem::ManuallyDrop;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier, OnceLock};
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 
 #[test]
@@ -154,15 +154,12 @@ fn refresh() {
 
 #[test]
 fn recursive_retire() {
-    fn collector() -> &'static Collector {
-        static COLLECTOR: OnceLock<Collector> = OnceLock::new();
-        COLLECTOR.get_or_init(|| Collector::new().batch_size(1))
-    }
-
     struct Recursive {
         _value: usize,
         pointers: Vec<*mut usize>,
     }
+
+    let collector = Collector::new().batch_size(1);
 
     let ptr = boxed(Recursive {
         _value: 0,
@@ -170,18 +167,20 @@ fn recursive_retire() {
     });
 
     unsafe {
-        collector().retire(ptr, |link| {
-            let value = Box::from_raw(link.cast::<Recursive>());
+        collector.retire(ptr, |ptr: *mut Recursive, collector| {
+            let value = Box::from_raw(ptr);
+
             for pointer in value.pointers {
-                collector().retire(pointer, reclaim::boxed);
-                let mut guard = collector().enter();
+                collector.retire(pointer, reclaim::boxed);
+
+                let mut guard = collector.enter();
                 guard.flush();
                 guard.refresh();
                 drop(guard);
             }
         });
 
-        collector().enter().flush();
+        collector.enter().flush();
     }
 }
 
@@ -209,34 +208,29 @@ fn reclaim_all() {
 fn recursive_retire_reclaim_all() {
     struct Recursive {
         _value: usize,
-        collector: *mut Collector,
         pointers: Vec<*mut DropTrack>,
     }
 
     unsafe {
-        // make sure retire runs in drop, not immediately
-        let collector = Box::into_raw(Box::new(Collector::new().batch_size(cfg::ITEMS * 2)));
+        let collector = Collector::new().batch_size(cfg::ITEMS * 2);
         let dropped = Arc::new(AtomicUsize::new(0));
 
         let ptr = boxed(Recursive {
             _value: 0,
-            collector,
             pointers: (0..cfg::ITEMS)
                 .map(|_| boxed(DropTrack(dropped.clone())))
                 .collect(),
         });
 
-        (*collector).retire(ptr, |link| {
-            let value = Box::from_raw(link.cast::<Recursive>());
-            let collector = value.collector;
+        collector.retire(ptr, |ptr: *mut Recursive, collector| {
+            let value = Box::from_raw(ptr);
             for pointer in value.pointers {
                 (*collector).retire(pointer, reclaim::boxed);
             }
         });
 
-        (*collector).reclaim_all();
+        collector.reclaim_all();
         assert_eq!(dropped.load(Ordering::Relaxed), cfg::ITEMS);
-        let _ = Box::from_raw(collector);
     }
 }
 

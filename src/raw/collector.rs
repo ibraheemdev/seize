@@ -27,6 +27,9 @@ pub struct Collector {
     /// exiting.
     reservations: ThreadLocal<CachePadded<Reservation>>,
 
+    /// A unique identifier for a collector.
+    pub(crate) id: usize,
+
     /// The minimum number of nodes required in a batch before attempting
     /// retirement.
     pub(crate) batch_size: usize,
@@ -36,7 +39,11 @@ impl Collector {
     /// Create a collector with the provided batch size and initial thread
     /// count.
     pub fn new(threads: usize, batch_size: usize) -> Self {
+        // A counter for collector IDs.
+        static ID: AtomicUsize = AtomicUsize::new(0);
+
         Self {
+            id: ID.fetch_add(1, Ordering::Relaxed),
             reservations: ThreadLocal::with_capacity(threads),
             batches: ThreadLocal::with_capacity(threads),
             batch_size: batch_size.next_power_of_two(),
@@ -120,7 +127,7 @@ impl Collector {
             atomic::fence(Ordering::Acquire);
 
             // Decrement the reference counts of any batches that were retired.
-            unsafe { Collector::traverse(head) }
+            unsafe { self.traverse(head) }
         }
     }
 
@@ -138,7 +145,7 @@ impl Collector {
 
         if head != Entry::INACTIVE {
             // Decrement the reference counts of any batches that were retired.
-            unsafe { Collector::traverse(head) }
+            unsafe { self.traverse(head) }
         }
     }
 
@@ -157,7 +164,12 @@ impl Collector {
     /// Additionally, current thread must have unique access to the batch for
     /// the provided `thread`.
     #[inline]
-    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T), thread: Thread) {
+    pub unsafe fn add<T>(
+        &self,
+        ptr: *mut T,
+        reclaim: unsafe fn(*mut T, &crate::Collector),
+        thread: Thread,
+    ) {
         // Safety: The caller guarantees we have unique access to the batch.
         let local_batch = unsafe { self.batches.load(thread).get() };
 
@@ -170,12 +182,13 @@ impl Collector {
             // Safety: `LocalBatch::DROP` means we have unique access to the collector.
             // Additionally, the caller guarantees that the pointer is valid for the
             // provided reclaimer.
-            unsafe { reclaim(ptr) }
+            unsafe { reclaim(ptr, crate::Collector::from_raw(self)) }
             return;
         }
 
         // Safety: `fn(*mut T) and fn(*mut U)` are ABI compatible if `T, U: Sized`.
-        let reclaim: unsafe fn(*mut ()) = unsafe { std::mem::transmute(reclaim) };
+        let reclaim: unsafe fn(*mut (), &crate::Collector) =
+            unsafe { std::mem::transmute(reclaim) };
 
         // Safety: The caller guarantees we have unique access to the batch.
         let len = unsafe {
@@ -364,7 +377,7 @@ impl Collector {
             // Additionally, the local batch has been reset and we are not holding on to any
             // mutable references, so any recursive calls to `retire` during
             // reclamation are valid.
-            unsafe { Collector::free_batch(batch) }
+            unsafe { self.free_batch(batch) }
         }
     }
 
@@ -376,7 +389,7 @@ impl Collector {
     /// `list` must be a valid reservation list.
     #[cold]
     #[inline(never)]
-    unsafe fn traverse(mut list: *mut Entry) {
+    unsafe fn traverse(&self, mut list: *mut Entry) {
         while !list.is_null() {
             let curr = list;
 
@@ -396,7 +409,7 @@ impl Collector {
 
                     // Safety: We have the last reference to the batch and it has been removed from
                     // our reservation list.
-                    Collector::free_batch(batch)
+                    self.free_batch(batch)
                 }
             }
         }
@@ -433,7 +446,7 @@ impl Collector {
             // ensured it is non-null. Additionally, the local batch was reset
             // above, so the batch is inaccessible through recursive calls to
             // `retire`.
-            unsafe { Collector::free_batch(batch) };
+            unsafe { self.free_batch(batch) };
 
             // Reset the batch.
             //
@@ -453,10 +466,10 @@ impl Collector {
     /// access the local batch; the batch being retired must be unreachable
     /// through any recursive calls.
     #[inline]
-    unsafe fn free_batch(batch: *mut Batch) {
+    unsafe fn free_batch(&self, batch: *mut Batch) {
         // Safety: We have a unique reference to the batch.
         for entry in unsafe { (*batch).entries.iter_mut() } {
-            unsafe { (entry.reclaim)(entry.ptr.cast()) };
+            unsafe { (entry.reclaim)(entry.ptr.cast(), crate::Collector::from_raw(self)) };
         }
 
         unsafe { LocalBatch::free(batch) };
@@ -530,7 +543,7 @@ struct Entry {
     ptr: *mut (),
 
     /// The function used to reclaim the object.
-    reclaim: unsafe fn(*mut ()),
+    reclaim: unsafe fn(*mut (), &crate::Collector),
 
     /// The state of the retired object.
     state: EntryState,

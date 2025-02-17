@@ -209,13 +209,16 @@ impl<T> Stack<T> {
 If you need to run custom reclamation code, you can write a custom reclaimer.
 
 ```rust,ignore
-collector.retire(value, |value: *mut Node<T>| unsafe {
+collector.retire(value, |value: *mut Node<T>, _collector: &Collector| unsafe {
     // Safety: The value was allocated with `Box::new`.
     let value = Box::from_raw(ptr);
     println!("Dropping {value}");
     drop(value);
 });
 ```
+
+Note that the reclaimer receives a reference to the collector as its second
+argument, allowing for recursive reclamation.
 
 [`defer_retire`]:
   https://docs.rs/seize/latest/seize/trait.Guard.html#tymethod.defer_retire

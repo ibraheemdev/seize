@@ -6,12 +6,14 @@
 
 use std::ptr;
 
+use crate::Collector;
+
 /// Reclaims memory allocated with [`Box`].
 ///
 /// # Safety
 ///
 /// The safety requirements of [`Box::from_raw`] apply.
-pub unsafe fn boxed<T>(ptr: *mut T) {
+pub unsafe fn boxed<T>(ptr: *mut T, _collector: &Collector) {
     unsafe { drop(Box::from_raw(ptr)) }
 }
 
@@ -20,6 +22,6 @@ pub unsafe fn boxed<T>(ptr: *mut T) {
 /// # Safety
 ///
 /// The safety requirements of [`ptr::drop_in_place`] apply.
-pub unsafe fn in_place<T>(ptr: *mut T) {
+pub unsafe fn in_place<T>(ptr: *mut T, _collector: &Collector) {
     unsafe { ptr::drop_in_place::<T>(ptr) }
 }
