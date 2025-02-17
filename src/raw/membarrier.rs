@@ -1,17 +1,20 @@
-//! Inspired by https://github.com/jeehoonkang/membarrier-rs.
-//
+//! Memory barriers optimized for RCU, inspired by <https://github.com/jeehoonkang/membarrier-rs>.
+//!
 //! # Semantics
 //!
 //! There is a total order over all memory barriers provided by this module:
-//! - Light store barriers, created by a pair of [`light_store`] and [`light_store_barrier`].
-//! - Light load barriers, created by a pair of [`light_load`] and [`light_load_barrier`].
+//! - Light store barriers, created by a pair of [`light_store`] and
+//!   [`light_store_barrier`].
+//! - Light load barriers, created by a pair of [`light_load_barrier`] and
+//!   [`light_load`].
 //! - Sequentially consistent barriers, or cumulative light barriers.
 //! - Heavy barriers, created by [`heavy`].
 //!
-//! If thread A issues barrier X and thread B issues barrier Y and X occurs before Y in the
-//! total order, X is ordered before Y with respect to coherence only if either X or Y is
-//! a heavy barrier. In other words, there is no way to establish an ordering between light
-//! barriers without the presence of a heavy barrier.
+//! If thread A issues barrier X and thread B issues barrier Y and X occurs
+//! before Y in the total order, X is ordered before Y with respect to coherence
+//! only if either X or Y is a heavy barrier. In other words, there is no way to
+//! establish an ordering between light barriers without the presence of a heavy
+//! barrier.
 #![allow(dead_code)]
 
 #[cfg(all(target_os = "linux", feature = "fast-barrier", not(miri)))]
@@ -37,7 +40,8 @@ mod default {
 
     pub fn detect() {}
 
-    /// The ordering for a store operation that synchronizes with heavy barriers.
+    /// The ordering for a store operation that synchronizes with heavy
+    /// barriers.
     ///
     /// Must be followed by a light barrier.
     #[inline]
@@ -52,20 +56,22 @@ mod default {
         // This is a no-op due to strong loads and stores.
     }
 
-    /// The ordering for a load operation that synchronizes with heavy barriers.
-    #[inline]
-    pub fn light_load() -> Ordering {
-        // Participate in the total order established by light and heavy `SeqCst` barriers.
-        Ordering::SeqCst
-    }
-
-    /// Issues a light memory barrier for a preceding load operation.
+    /// Issues a light memory barrier for a subsequent load operation.
     #[inline]
     pub fn light_load_barrier() {
         // This is a no-op due to strong loads and stores.
     }
 
-    /// Issues a heavy memory barrier for slow path that synchronizes with light stores.
+    /// The ordering for a load operation that synchronizes with heavy barriers.
+    #[inline]
+    pub fn light_load() -> Ordering {
+        // Participate in the total order established by light and heavy `SeqCst`
+        // barriers.
+        Ordering::SeqCst
+    }
+
+    /// Issues a heavy memory barrier for slow path that synchronizes with light
+    /// stores.
     #[inline]
     pub fn heavy() {
         // Synchronize with `SeqCst` light stores.
@@ -77,7 +83,8 @@ mod default {
 mod linux {
     use std::sync::atomic::{self, AtomicU8, Ordering};
 
-    /// The ordering for a store operation that synchronizes with heavy barriers.
+    /// The ordering for a store operation that synchronizes with heavy
+    /// barriers.
     ///
     /// Must be followed by a light barrier.
     #[inline]
@@ -94,25 +101,28 @@ mod linux {
         atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
+    /// Issues a light memory barrier for a subsequent load operation.
+    #[inline]
+    pub fn light_load_barrier() {
+        // This fence shouldn't really be necessary because loads use `SeqCst`
+        // unconditionally, but it doesn't hurt.
+        atomic::compiler_fence(atomic::Ordering::SeqCst)
+    }
+
     /// The ordering for a load operation that synchronizes with heavy barriers.
     #[inline]
     pub fn light_load() -> Ordering {
-        // There is no difference between `Acquire` and `SeqCst` loads on most platforms, so
-        // checking the strategy is not worth it.
+        // There is no difference between `Acquire` and `SeqCst` loads on most
+        // platforms, so checking the strategy is not worth it.
         Ordering::SeqCst
-    }
-
-    /// Issues a light memory barrier for a preceding load operation.
-    #[inline]
-    pub fn light_load_barrier() {
-        atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
     /// Issues a heavy memory barrier for slow path.
     #[inline]
     pub fn heavy() {
-        // Issue a private expedited membarrier using the `sys_membarrier()` system call, if
-        // supported; otherwise, fall back to `mprotect()`-based process-wide memory barrier.
+        // Issue a private expedited membarrier using the `sys_membarrier()` system
+        // call, if supported; otherwise, fall back to `mprotect()`-based
+        // process-wide memory barrier.
         match STRATEGY.load(Ordering::Relaxed) {
             MEMBARRIER => membarrier::barrier(),
             MPROTECT => mprotect::barrier(),
@@ -158,10 +168,11 @@ mod linux {
         /// # Caveat
         ///
         /// We're defining it here because, unfortunately, the `libc` crate currently doesn't
-        /// expose `membarrier_cmd` for us. You can find the numbers in the [Linux source
-        /// code](https://github.com/torvalds/linux/blob/master/include/uapi/linux/membarrier.h).
+        /// expose `membarrier_cmd` for us. You can find the numbers in the
+        /// [Linux source code](https://github.com/torvalds/linux/blob/master/include/uapi/linux/membarrier.h).
         ///
-        /// This enum should really be `#[repr(libc::c_int)]`, but Rust currently doesn't allow it.
+        /// This enum should really be `#[repr(libc::c_int)]`, but Rust
+        /// currently doesn't allow it.
         #[repr(i32)]
         #[allow(dead_code, non_camel_case_types)]
         enum membarrier_cmd {
@@ -224,8 +235,9 @@ mod linux {
         unsafe impl Sync for Barrier {}
 
         impl Barrier {
-            /// Issues a process-wide barrier by changing access protections of a single mmap-ed
-            /// page. This method is not as fast as the `sys_membarrier()` call, but works very
+            /// Issues a process-wide barrier by changing access protections of
+            /// a single mmap-ed page. This method is not as fast as
+            /// the `sys_membarrier()` call, but works very
             /// similarly.
             #[inline]
             fn barrier(&self) {
@@ -259,8 +271,8 @@ mod linux {
             }
         }
 
-        /// An alternative solution to `sys_membarrier` that works on older Linux kernels and
-        /// x86/x86-64 systems.
+        /// An alternative solution to `sys_membarrier` that works on older
+        /// Linux kernels and x86/x86-64 systems.
         static BARRIER: OnceLock<Barrier> = OnceLock::new();
 
         /// Returns `true` if the `mprotect`-based trick is supported.
@@ -328,7 +340,8 @@ mod windows {
 
     pub fn detect() {}
 
-    /// The ordering for a store operation that synchronizes with heavy barriers.
+    /// The ordering for a store operation that synchronizes with heavy
+    /// barriers.
     ///
     /// Must be followed by a light barrier.
     #[inline]
@@ -342,19 +355,20 @@ mod windows {
         atomic::compiler_fence(Ordering::SeqCst);
     }
 
+    /// Issues a light memory barrier for a subsequent load operation.
+    #[inline]
+    pub fn light_load_barrier() {
+        atomic::compiler_fence(Ordering::SeqCst);
+    }
+
     /// The ordering for a load operation that synchronizes with heavy barriers.
     #[inline]
     pub fn light_load() -> Ordering {
         Ordering::Relaxed
     }
 
-    /// Issues a light memory barrier for a preceding load operation.
-    #[inline]
-    pub fn light_load_barrier() {
-        atomic::compiler_fence(Ordering::SeqCst);
-    }
-
-    /// Issues a heavy memory barrier for slow path that synchronizes with light stores.
+    /// Issues a heavy memory barrier for slow path that synchronizes with light
+    /// stores.
     #[inline]
     pub fn heavy() {
         // Invoke the `FlushProcessWriteBuffers()` system call.
