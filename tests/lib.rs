@@ -327,6 +327,82 @@ fn reentrant() {
 }
 
 #[test]
+fn swap_stress() {
+    for _ in 0..cfg::ITER {
+        let collector = Collector::new();
+        let entries = [const { AtomicPtr::new(ptr::null_mut()) }; cfg::ITEMS];
+
+        thread::scope(|s| {
+            for _ in 0..cfg::THREADS {
+                s.spawn(|| {
+                    for i in 0..cfg::ITEMS {
+                        let guard = collector.enter();
+                        let new = Box::into_raw(Box::new(i));
+                        let old = guard.swap(&entries[i], new, Ordering::AcqRel);
+                        if !old.is_null() {
+                            unsafe { assert_eq!(*old, i) }
+                            unsafe { guard.defer_retire(old, reclaim::boxed) }
+                        }
+                    }
+                });
+            }
+        });
+
+        for i in 0..cfg::ITEMS {
+            let val = entries[i].load(Ordering::Relaxed);
+            let _ = unsafe { Box::from_raw(val) };
+        }
+    }
+}
+
+#[test]
+fn cas_stress() {
+    for _ in 0..cfg::ITER {
+        let collector = Collector::new();
+        let entries = [const { AtomicPtr::new(ptr::null_mut()) }; cfg::ITEMS];
+
+        thread::scope(|s| {
+            for _ in 0..cfg::THREADS {
+                s.spawn(|| {
+                    for i in 0..cfg::ITEMS {
+                        let guard = collector.enter();
+                        let new = Box::into_raw(Box::new(i));
+
+                        loop {
+                            let old = entries[i].load(Ordering::Relaxed);
+
+                            let result = guard.compare_exchange(
+                                &entries[i],
+                                old,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            );
+
+                            let Ok(old) = result else {
+                                continue;
+                            };
+
+                            if !old.is_null() {
+                                unsafe { assert_eq!(*old, i) }
+                                unsafe { guard.defer_retire(old, reclaim::boxed) }
+                            }
+
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        for i in 0..cfg::ITEMS {
+            let val = entries[i].load(Ordering::Relaxed);
+            let _ = unsafe { Box::from_raw(val) };
+        }
+    }
+}
+
+#[test]
 fn owned_guard() {
     let collector = Collector::new().batch_size(5);
     let dropped = Arc::new(AtomicUsize::new(0));
