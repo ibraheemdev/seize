@@ -17,7 +17,7 @@ use std::ptr;
 /// passing this function to [`retire`](crate::Collector::retire).
 /// The value retired must have been of type `T` to be retired through
 /// `boxed::<T>`.
-pub unsafe fn boxed<T>(link: *mut ()) {
+pub unsafe fn boxed<T>(link: *mut T) {
     unsafe {
         let _: Box<T> = Box::from_raw(link.cast::<T>());
     }
@@ -33,7 +33,7 @@ pub unsafe fn boxed<T>(link: *mut ()) {
 /// passing this function to [`retire`](crate::Collector::retire).
 /// The value retired must have been of type `T` to be retired through
 /// `in_place::<T>`.
-pub unsafe fn in_place<T>(link: *mut ()) {
+pub unsafe fn in_place<T>(link: *mut T) {
     unsafe {
         ptr::drop_in_place::<T>(link.cast::<T>());
     }

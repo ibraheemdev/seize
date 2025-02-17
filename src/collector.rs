@@ -90,7 +90,7 @@ impl Collector {
     /// let guard = collector.enter();
     /// let value = guard.protect(&ptr, Ordering::Acquire);
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard.defer_retire(value, reclaim::boxed::<Linked<usize>>) };
+    /// # unsafe { guard.defer_retire(value, reclaim::boxed) };
     /// ```
     ///
     /// Note that `enter` is reentrant, and it is legal to create
@@ -113,7 +113,7 @@ impl Collector {
     /// // is still safe to access as a guard still
     /// // exists
     /// unsafe { assert_eq!(**value, 1) }
-    /// # unsafe { guard2.defer_retire(value, reclaim::boxed::<Linked<usize>>) };
+    /// # unsafe { guard2.defer_retire(value, reclaim::boxed) };
     /// drop(guard2) // _now_, the thread is marked as inactive
     /// ```
     #[inline]
@@ -170,8 +170,8 @@ impl Collector {
     /// let old = ptr.swap(collector.link_boxed(2_usize), Ordering::Release);
     /// // reclaim the old value
     /// // safety: the `swap` above made the old value unreachable for any new threads
-    /// unsafe { collector.retire(old, reclaim::boxed::<Linked<usize>>) };
-    /// # unsafe { collector.retire(ptr.load(Ordering::Relaxed), reclaim::boxed::<Linked<usize>>) };
+    /// unsafe { collector.retire(old, reclaim::boxed) };
+    /// # unsafe { collector.retire(ptr.load(Ordering::Relaxed), reclaim::boxed) };
     /// ```
     ///
     /// Alternative, a custom reclaimer function can be used:
@@ -195,7 +195,7 @@ impl Collector {
     /// }
     /// ```
     #[inline]
-    pub unsafe fn retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
+    pub unsafe fn retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T)) {
         debug_assert!(!ptr.is_null(), "attempted to retire null pointer");
 
         // Note that `add` doesn't ever actually reclaim the pointer immediately if
