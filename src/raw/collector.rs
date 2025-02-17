@@ -87,24 +87,20 @@ impl Collector {
         //
         // Note that all pointer loads perform a light barrier to participate in the
         // total order.
-        membarrier::light_store_barrier();
+        membarrier::light_barrier();
     }
 
-    /// Strengthens an ordering to that necessary to protect the load of a pointer.
+    /// Strengthens an ordering to that necessary to protect the load of a
+    /// pointer.
     #[inline]
-    pub fn protect(_ordering: Ordering) -> Ordering {
-        // This fence shouldn't really be necessary because loads use `SeqCst`
-        // unconditionally, but it doesn't hurt.
-        membarrier::light_load_barrier();
-
+    pub fn protect(_order: Ordering) -> Ordering {
         // We have to respect both the user provided ordering and the ordering required
         // by the membarrier strategy. `SeqCst` is equivalent to `Acquire` on
         // most platforms, so we just use it unconditionally.
         //
-        // Loads performed with this ordering, paired with the light barrier above, will
-        // participate in the total order established by `enter`, and thus see the new
-        // values of any pointers that were retired when the thread was
-        // inactive.
+        // Loads performed with this ordering, paired with the light barrier in `enter`,
+        // will participate in the total order established by `enter`, and thus see the
+        // new values of any pointers that were retired when the thread was inactive.
         Ordering::SeqCst
     }
 

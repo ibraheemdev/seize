@@ -72,9 +72,10 @@ impl Collector {
     /// loads of concurrent objects for its lifetime. The thread will be
     /// marked as inactive when the guard is dropped.
     ///
-    /// Note that loads of objects that may be retired must be protected with the
-    /// [`Guard::protect`]. See [the guide](crate::guide#starting-operations) for
-    /// an introduction to using guards, or the documentation of [`LocalGuard`] for
+    /// Note that loads of objects that may be retired must be protected with
+    /// the [`Guard::protect`]. See [the
+    /// guide](crate::guide#starting-operations) for an introduction to
+    /// using guards, or the documentation of [`LocalGuard`] for
     /// more details.
     ///
     /// Note that `enter` is reentrant, and it is legal to create multiple

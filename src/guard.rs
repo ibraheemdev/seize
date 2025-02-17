@@ -22,7 +22,8 @@ pub trait Guard {
     /// This method is not marked as `unsafe`, but will affect the validity of
     /// pointers loaded using [`Guard::protect`], similar to dropping a guard.
     /// It is intended to be used safely by users of concurrent data structures,
-    /// as references will be tied to the guard and this method takes `&mut self`.
+    /// as references will be tied to the guard and this method takes `&mut
+    /// self`.
     fn refresh(&mut self);
 
     /// Flush any retired values in the local batch.
@@ -46,8 +47,8 @@ pub trait Guard {
     /// a cheap way to get an identifier for the current thread without TLS
     /// overhead. Note that thread IDs may be reused, so the value returned
     /// is only unique for the lifetime of this thread.
-    ///
     fn thread_id(&self) -> usize;
+
     /// Protects the load of an atomic pointer.
     ///
     /// Any valid pointer loaded through a guard using the `protect` method is
@@ -58,10 +59,63 @@ pub trait Guard {
     ///
     /// Note that the lifetime of a guarded pointer is logically tied to that of
     /// the guard — when the guard is dropped the pointer is invalidated. Data
-    /// structures that return shared references to values should ensure that the
-    /// lifetime of the reference is tied to the lifetime of a guard.
-    fn protect<T>(&self, ptr: &AtomicPtr<T>, ordering: Ordering) -> *mut T {
-        ptr.load(raw::Collector::protect(ordering))
+    /// structures that return shared references to values should ensure that
+    /// the lifetime of the reference is tied to the lifetime of a guard.
+    fn protect<T>(&self, ptr: &AtomicPtr<T>, order: Ordering) -> *mut T {
+        ptr.load(raw::Collector::protect(order))
+    }
+
+    /// Stores a value into the pointer, returning the protected previous value.
+    ///
+    /// This method is equivalent to [`AtomicPtr::swap`], except the returned
+    /// value is guaranteed to be protected with the same guarantees as
+    /// [`Guard::protect`].
+    fn swap<T>(&self, ptr: &AtomicPtr<T>, value: *mut T, order: Ordering) -> *mut T {
+        ptr.swap(value, raw::Collector::protect(order))
+    }
+
+    /// Stores a value into the pointer if the current value is the same as the
+    /// `current` value, returning the protected previous value.
+    ///
+    /// This method is equivalent to [`AtomicPtr::compare_exchange`], except the
+    /// returned value is guaranteed to be protected with the same
+    /// guarantees as [`Guard::protect`].
+    fn compare_exchange<T>(
+        &self,
+        ptr: &AtomicPtr<T>,
+        current: *mut T,
+        new: *mut T,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<*mut T, *mut T> {
+        ptr.compare_exchange(
+            current,
+            new,
+            raw::Collector::protect(success),
+            raw::Collector::protect(failure),
+        )
+    }
+
+    /// Stores a value into the pointer if the current value is the same as the
+    /// `current` value, returning the protected previous value.
+    ///
+    /// This method is equivalent to [`AtomicPtr::compare_exchange_weak`],
+    /// except the returned value is guaranteed to be protected with the
+    /// same guarantees as [`Guard::protect`].
+    fn compare_exchange_weak<T>(
+        &self,
+        ptr: &AtomicPtr<T>,
+        current: *mut T,
+        new: *mut T,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<*mut T, *mut T> {
+        ptr.compare_exchange_weak(
+            current,
+            new,
+            raw::Collector::protect(success),
+            raw::Collector::protect(failure),
+        )
     }
 
     /// Retires a value, running `reclaim` when no threads hold a reference to
