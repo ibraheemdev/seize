@@ -2,7 +2,6 @@ use crate::raw::{self, membarrier, Thread};
 use crate::{LocalGuard, OwnedGuard};
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A concurrent garbage collector.
 ///
@@ -14,10 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Every instance of a concurrent data structure should typically own its
 /// `Collector`. This allows the garbage collection of non-`'static` values, as
 /// memory reclamation is guaranteed to run when the `Collector` is dropped.
+#[repr(transparent)]
 pub struct Collector {
-    /// A unique identifier for a collector.
-    id: usize,
-
     /// The underlying raw collector instance.
     pub(crate) raw: raw::Collector,
 }
@@ -34,9 +31,6 @@ impl Collector {
 
     /// Creates a new collector.
     pub fn new() -> Self {
-        // A counter for collector IDs.
-        static ID: AtomicUsize = AtomicUsize::new(0);
-
         // Initialize the `membarrier` module, detecting the presence of
         // operating-system strong barrier APIs.
         membarrier::detect();
@@ -50,7 +44,6 @@ impl Collector {
         let batch_size = cpus.max(Self::DEFAULT_BATCH_SIZE);
 
         Self {
-            id: ID.fetch_add(1, Ordering::Relaxed),
             raw: raw::Collector::new(cpus, batch_size),
         }
     }
@@ -187,14 +180,16 @@ impl Collector {
     /// Alternative, a custom reclaimer function can be used.
     ///
     /// ```
-    /// let collector = seize::Collector::new();
+    /// use seize::Collector;
+    ///
+    /// let collector = Collector::new();
     ///
     /// // Allocate a value and immediately retire it.
     /// let value: *mut usize = Box::into_raw(Box::new(1_usize));
     ///
     /// // Safety: The value was never shared.
     /// unsafe {
-    ///     collector.retire(value, |ptr: *mut usize| unsafe {
+    ///     collector.retire(value, |ptr: *mut usize, _collector: &Collector| unsafe {
     ///         // Safety: The value was allocated with `Box::new`.
     ///         let value = Box::from_raw(ptr);
     ///         println!("Dropping {value}");
@@ -203,7 +198,7 @@ impl Collector {
     /// }
     /// ```
     #[inline]
-    pub unsafe fn retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T)) {
+    pub unsafe fn retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T, &Collector)) {
         debug_assert!(!ptr.is_null(), "attempted to retire a null pointer");
 
         // Note that `add` doesn't ever actually reclaim the pointer immediately if
@@ -236,6 +231,11 @@ impl Collector {
     pub unsafe fn reclaim_all(&self) {
         unsafe { self.raw.reclaim_all() };
     }
+
+    // Create a reference to `Collector` from an underlying `raw::Collector`.
+    pub(crate) fn from_raw(raw: &raw::Collector) -> &Collector {
+        unsafe { &*(raw as *const raw::Collector as *const Collector) }
+    }
 }
 
 impl Eq for Collector {}
@@ -244,7 +244,7 @@ impl PartialEq for Collector {
     /// Checks if both references point to the same collector.
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.raw.id == other.raw.id
     }
 }
 
