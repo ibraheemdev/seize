@@ -138,8 +138,7 @@ mod seize_stack {
         }
 
         fn is_empty(&self) -> bool {
-            let guard = self.collector.enter();
-            guard.protect(&self.head, Ordering::Relaxed).is_null()
+            self.head.load(Ordering::Relaxed).is_null()
         }
     }
 
