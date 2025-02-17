@@ -130,7 +130,7 @@ mod seize_stack {
                 {
                     unsafe {
                         let data = ptr::read(&(*head).data);
-                        guard.defer_retire(head, reclaim::boxed::<Node<T>>);
+                        guard.defer_retire(head, reclaim::boxed);
                         return Some(ManuallyDrop::into_inner(data));
                     }
                 }

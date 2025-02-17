@@ -76,7 +76,7 @@ pub trait Guard {
     /// Additionally, the pointer must be valid to access as a [`Link`], per the
     /// [`AsLink`] trait, and the reclaimer passed to `retire` must
     /// correctly free values of type `T`.
-    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ()));
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T));
 
     /// Returns a numeric identifier for the current thread.
     ///
@@ -150,7 +150,7 @@ impl Guard for LocalGuard<'_> {
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
     #[inline]
-    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T)) {
         // Safety:
         // - `self.thread` is the current thread.
         // - The validity of the pointer is guaranteed by the caller.
@@ -271,7 +271,7 @@ impl Guard for OwnedGuard<'_> {
     /// Retires a value, running `reclaim` when no threads hold a reference to
     /// it.
     #[inline]
-    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T)) {
         // Safety: `self.reservation` is owned by the current thread.
         let reservation = unsafe { &*self.reservation };
         let _lock = reservation.lock.lock().unwrap();
@@ -370,8 +370,8 @@ impl Guard for UnprotectedGuard {
 
     /// Reclaims the pointer immediately.
     #[inline]
-    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ())) {
-        unsafe { reclaim(ptr.cast()) }
+    unsafe fn defer_retire<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T)) {
+        unsafe { reclaim(ptr) }
     }
 
     /// This method is a no-op.

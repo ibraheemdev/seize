@@ -142,7 +142,7 @@ impl Collector {
     /// inactive threads. Additionally, this method is not safe to call
     /// concurrently with the same `thread`.
     #[inline]
-    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut ()), thread: Thread) {
+    pub unsafe fn add<T>(&self, ptr: *mut T, reclaim: unsafe fn(*mut T), thread: Thread) {
         let local_batch = self.batches.load(thread).get();
 
         // Safety: Local batches are only accessed by the current thread.
@@ -154,6 +154,10 @@ impl Collector {
             unsafe { reclaim(ptr.cast()) }
             return;
         }
+
+        // Safety: The node and batch are both valid for mutable access.
+        // Safety: `fn(*mut T) and fn(*mut U)` are ABI compatible if `T, U: Sized`.
+        let reclaim: unsafe fn(*mut ()) = unsafe { std::mem::transmute(reclaim) };
 
         // Safety: The node and batch are both valid for mutable access.
         let len = unsafe {

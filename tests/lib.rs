@@ -40,7 +40,7 @@ fn single_thread() {
         {
             let guard = collector.enter();
             let value = guard.protect(&zero, Ordering::Acquire);
-            unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
+            unsafe { collector.retire(value, reclaim::boxed) }
         }
     }
 
@@ -75,13 +75,13 @@ fn two_threads() {
         let zero = AtomicPtr::new(boxed(DropTrack(b_dropped.clone())));
         let guard = collector.enter();
         let value = guard.protect(&zero, Ordering::Acquire);
-        unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
+        unsafe { collector.retire(value, reclaim::boxed) }
     }
 
     rx.recv().unwrap(); // wait for thread to access value
     let guard = collector.enter();
     let value = guard.protect(&one, Ordering::Acquire);
-    unsafe { collector.retire(value, reclaim::boxed::<DropTrack>) }
+    unsafe { collector.retire(value, reclaim::boxed) }
 
     rx.recv().unwrap(); // wait for thread to drop guard
     h.join().unwrap();
@@ -130,7 +130,7 @@ fn refresh() {
     for i in 0..cfg::ITER {
         for item in items.iter() {
             let old = item.swap(Box::into_raw(Box::new(i)), Ordering::AcqRel);
-            unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+            unsafe { collector.retire(old, reclaim::boxed) }
         }
     }
 
@@ -141,7 +141,7 @@ fn refresh() {
     // cleanup
     for item in items.iter() {
         let old = item.swap(ptr::null_mut(), Ordering::Acquire);
-        unsafe { collector.retire(old, reclaim::boxed::<usize>) }
+        unsafe { collector.retire(old, reclaim::boxed) }
     }
 }
 
@@ -166,7 +166,7 @@ fn recursive_retire() {
         collector().retire(ptr, |link| {
             let value = Box::from_raw(link.cast::<Recursive>());
             for pointer in value.pointers {
-                collector().retire(pointer, reclaim::boxed::<usize>);
+                collector().retire(pointer, reclaim::boxed);
                 let mut guard = collector().enter();
                 guard.flush();
                 guard.refresh();
@@ -190,7 +190,7 @@ fn reclaim_all() {
             .collect::<Vec<_>>();
 
         for item in items {
-            unsafe { collector.retire(item.load(Ordering::Relaxed), reclaim::boxed::<DropTrack>) };
+            unsafe { collector.retire(item.load(Ordering::Relaxed), reclaim::boxed) };
         }
 
         unsafe { collector.reclaim_all() };
@@ -223,7 +223,7 @@ fn recursive_retire_reclaim_all() {
             let value = Box::from_raw(link.cast::<Recursive>());
             let collector = value.collector;
             for pointer in value.pointers {
-                (*collector).retire(pointer, reclaim::boxed::<DropTrack>);
+                (*collector).retire(pointer, reclaim::boxed);
             }
         });
 
@@ -243,7 +243,7 @@ fn defer_retire() {
     let guard = collector.enter();
 
     for object in objects {
-        unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+        unsafe { guard.defer_retire(object, reclaim::boxed) }
         guard.flush();
     }
 
@@ -274,7 +274,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed) }
             }
         }
     })
@@ -306,7 +306,7 @@ fn reentrant() {
         move || {
             let guard = collector.enter();
             for object in { objects }.0 {
-                unsafe { guard.defer_retire(object, reclaim::boxed::<DropTrack>) }
+                unsafe { guard.defer_retire(object, reclaim::boxed) }
             }
         }
     })
@@ -344,7 +344,7 @@ fn owned_guard() {
         let guard2 = collector.enter();
         for object in objects.0.iter() {
             unsafe {
-                guard2.defer_retire(object.load(Ordering::Acquire), reclaim::boxed::<DropTrack>)
+                guard2.defer_retire(object.load(Ordering::Acquire), reclaim::boxed)
             }
         }
 
@@ -395,7 +395,7 @@ fn owned_guard_concurrent() {
                 unsafe {
                     guard.defer_retire(
                         objects.0[i].load(Ordering::Acquire),
-                        reclaim::boxed::<DropTrack>,
+                        reclaim::boxed,
                     )
                 };
 
@@ -567,7 +567,7 @@ impl<T> Stack<T> {
             {
                 unsafe {
                     let data = ptr::read(&(*head).data);
-                    self.collector.retire(head, reclaim::boxed::<Node<T>>);
+                    self.collector.retire(head, reclaim::boxed);
                     return Some(ManuallyDrop::into_inner(data));
                 }
             }
