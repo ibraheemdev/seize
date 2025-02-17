@@ -6,6 +6,13 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, OnceLock};
 use std::thread;
 
+#[test]
+fn is_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Collector>();
+    assert_send_sync::<Collector>();
+}
+
 struct DropTrack(Arc<AtomicUsize>);
 
 impl Drop for DropTrack {
@@ -343,9 +350,7 @@ fn owned_guard() {
 
         let guard2 = collector.enter();
         for object in objects.0.iter() {
-            unsafe {
-                guard2.defer_retire(object.load(Ordering::Acquire), reclaim::boxed)
-            }
+            unsafe { guard2.defer_retire(object.load(Ordering::Acquire), reclaim::boxed) }
         }
 
         drop(guard2);
@@ -392,12 +397,7 @@ fn owned_guard_concurrent() {
             s.spawn(move || {
                 barrier.wait();
 
-                unsafe {
-                    guard.defer_retire(
-                        objects.0[i].load(Ordering::Acquire),
-                        reclaim::boxed,
-                    )
-                };
+                unsafe { guard.defer_retire(objects.0[i].load(Ordering::Acquire), reclaim::boxed) };
 
                 guard.flush();
 
@@ -580,8 +580,7 @@ impl<T> Stack<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        let guard = self.collector.enter();
-        guard.protect(&self.head, Ordering::Relaxed).is_null()
+        self.head.load(Ordering::Relaxed).is_null()
     }
 }
 
