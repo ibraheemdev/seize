@@ -4,8 +4,8 @@
 //!
 //! There is a total order over all memory barriers provided by this module:
 //! - Light store barriers, created by a pair of [`light_store`] and
-//!   [`light_store_barrier`].
-//! - Light load barriers, created by a pair of [`light_load_barrier`] and
+//!   [`light_barrier`].
+//! - Light load barriers, created by a pair of [`light_barrier`] and
 //!   [`light_load`].
 //! - Sequentially consistent barriers, or cumulative light barriers.
 //! - Heavy barriers, created by [`heavy`].
@@ -50,15 +50,10 @@ mod default {
         Ordering::SeqCst
     }
 
-    /// Issues a light memory barrier for a preceding store operation.
+    /// Issues a light memory barrier for a preceding store or subsequent load
+    /// operation.
     #[inline]
-    pub fn light_store_barrier() {
-        // This is a no-op due to strong loads and stores.
-    }
-
-    /// Issues a light memory barrier for a subsequent load operation.
-    #[inline]
-    pub fn light_load_barrier() {
+    pub fn light_barrier() {
         // This is a no-op due to strong loads and stores.
     }
 
@@ -95,17 +90,10 @@ mod linux {
         }
     }
 
-    /// Issues a light memory barrier for a preceding store operation.
+    /// Issues a light memory barrier for a preceding store or subsequent load
+    /// operation.
     #[inline]
-    pub fn light_store_barrier() {
-        atomic::compiler_fence(atomic::Ordering::SeqCst)
-    }
-
-    /// Issues a light memory barrier for a subsequent load operation.
-    #[inline]
-    pub fn light_load_barrier() {
-        // This fence shouldn't really be necessary because loads use `SeqCst`
-        // unconditionally, but it doesn't hurt.
+    pub fn light_barrier() {
         atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
@@ -167,9 +155,9 @@ mod linux {
         ///
         /// # Caveat
         ///
-        /// We're defining it here because, unfortunately, the `libc` crate currently doesn't
-        /// expose `membarrier_cmd` for us. You can find the numbers in the
-        /// [Linux source code](https://github.com/torvalds/linux/blob/master/include/uapi/linux/membarrier.h).
+        /// We're defining it here because, unfortunately, the `libc` crate
+        /// currently doesn't expose `membarrier_cmd` for us. You can
+        /// find the numbers in the [Linux source code](https://github.com/torvalds/linux/blob/master/include/uapi/linux/membarrier.h).
         ///
         /// This enum should really be `#[repr(libc::c_int)]`, but Rust
         /// currently doesn't allow it.
@@ -349,16 +337,11 @@ mod windows {
         Ordering::Relaxed
     }
 
-    /// Issues a light memory barrier for a preceding store operation.
+    /// Issues a light memory barrier for a preceding store or subsequent load
+    /// operation.
     #[inline]
-    pub fn light_store_barrier() {
-        atomic::compiler_fence(Ordering::SeqCst);
-    }
-
-    /// Issues a light memory barrier for a subsequent load operation.
-    #[inline]
-    pub fn light_load_barrier() {
-        atomic::compiler_fence(Ordering::SeqCst);
+    pub fn light_barrier() {
+        atomic::compiler_fence(atomic::Ordering::SeqCst)
     }
 
     /// The ordering for a load operation that synchronizes with heavy barriers.

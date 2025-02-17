@@ -39,10 +39,10 @@ unsafe impl<T: Send> Send for ThreadLocal<T> {}
 
 /// Safety:
 ///
-/// - Values can be inserted through a shared reference and thus dropped
-///   on another thread than they were created on, hence `T: Send`.
-/// - However, there is no way to access a `T` inserted by another thread
-///   except through iteration, which is unsafe, so `T: Sync` is not required.
+/// - Values can be inserted through a shared reference and thus dropped on
+///   another thread than they were created on, hence `T: Send`.
+/// - However, there is no way to access a `T` inserted by another thread except
+///   through iteration, which is unsafe, so `T: Sync` is not required.
 unsafe impl<T: Send> Sync for ThreadLocal<T> {}
 
 impl<T> ThreadLocal<T> {
