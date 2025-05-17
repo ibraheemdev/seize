@@ -2,6 +2,7 @@ use crate::raw::{self, membarrier, Thread};
 use crate::{LocalGuard, OwnedGuard};
 
 use std::fmt;
+use std::sync::OnceLock;
 
 /// A concurrent garbage collector.
 ///
@@ -35,9 +36,13 @@ impl Collector {
         // operating-system strong barrier APIs.
         membarrier::detect();
 
-        let cpus = std::thread::available_parallelism()
-            .map(Into::into)
-            .unwrap_or(1);
+        // available_parallelism is quite slow (microseconds).
+        static CPUS: OnceLock<usize> = OnceLock::new();
+        let cpus = *CPUS.get_or_init(|| {
+            std::thread::available_parallelism()
+                .map(Into::into)
+                .unwrap_or(1)
+        });
 
         // Ensure every batch accumulates at least as many entries
         // as there are threads on the system.
