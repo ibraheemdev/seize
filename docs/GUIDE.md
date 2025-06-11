@@ -64,7 +64,7 @@ impl Stack {
 are the core of safe memory reclamation, letting other threads know that the
 current thread may be accessing shared memory.
 
-Using a guard, you cana perform a _protected_ load of an atomic pointer using
+Using a guard, you can perform a _protected_ load of an atomic pointer using
 the [`Guard::protect`] method. Any valid pointer that is protected is guaranteed
 to stay valid until the guard is dropped, or the pointer is retired by the
 current thread. Importantly, if another thread retires an object that you
