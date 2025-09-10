@@ -14,7 +14,7 @@ rust-version = "1.72.0"
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading"], optional = true }
+windows-sys = { version = ">=0.59, <=0.61", features = ["Win32_System_Threading"], optional = true }
 
 [features]
 default = ["fast-barrier"]
@@ -23,7 +23,7 @@ default = ["fast-barrier"]
 fast-barrier = ["windows-sys", "libc"]
 
 [dev-dependencies]
-criterion = "0.3.5"
+criterion = "0.3.6"
 crossbeam-epoch = "0.9.8"
 haphazard = { git = "https://github.com/jonhoo/haphazard", rev = "e0e18f60f78652a63aba235be854f87d106c1a1b" }
 
