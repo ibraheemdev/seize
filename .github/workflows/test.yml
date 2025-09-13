@@ -62,3 +62,24 @@ jobs:
         run: cargo generate-lockfile
       - name: cargo test
         run: cargo test --locked --all-features --all-targets
+  minimal-versions:
+    # cargo-minimal-versions checks that the crate works with the minimum versions of its
+    # dependencies.
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} / stable / minimal-versions
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+      - name: cargo install cargo-minimal-versions
+        uses: taiki-e/install-action@cargo-minimal-versions
+      - name: cargo minimal-versions test
+        run: cargo minimal-versions test --all-features --all-targets

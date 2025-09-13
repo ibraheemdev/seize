@@ -14,7 +14,7 @@ rust-version = "1.72.0"
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading"], optional = true }
+windows-sys = { version = ">=0.52, <=0.61", features = ["Win32_System_Threading"], optional = true }
 
 [features]
 default = ["fast-barrier"]
