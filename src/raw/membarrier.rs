@@ -77,6 +77,7 @@ mod default {
 #[cfg(all(target_os = "linux", feature = "fast-barrier", not(miri)))]
 mod linux {
     use std::sync::atomic::{self, AtomicU8, Ordering};
+    use std::sync::Once;
 
     /// The ordering for a store operation that synchronizes with heavy
     /// barriers.
@@ -112,7 +113,15 @@ mod linux {
         // call, if supported; otherwise, fall back to `mprotect()`-based
         // process-wide memory barrier.
         match STRATEGY.load(Ordering::Relaxed) {
-            MEMBARRIER => membarrier::barrier(),
+            MEMBARRIER => {
+                membarrier::register();
+                // Registration falls back to `mprotect` if the kernel refuses it.
+                if STRATEGY.load(Ordering::Relaxed) == MEMBARRIER {
+                    membarrier::barrier()
+                } else {
+                    mprotect::barrier()
+                }
+            }
             MPROTECT => mprotect::barrier(),
             _ => atomic::fence(atomic::Ordering::SeqCst),
         }
@@ -130,13 +139,23 @@ mod linux {
     /// The right strategy to use on the current machine.
     static STRATEGY: AtomicU8 = AtomicU8::new(FALLBACK);
 
-    /// Perform runtime detection for a membarrier strategy.
+    /// Perform runtime detection for a membarrier strategy, once per process.
+    ///
+    /// Detection only queries the kernel. Registration is deferred to the first
+    /// heavy barrier (see `membarrier::register`), because the kernel completes
+    /// it only after an RCU grace period once the process has a second thread:
+    /// registering here would charge that wait to collector creation, which is
+    /// usually the first access to a data structure, even in programs that never
+    /// retire anything.
     pub fn detect() {
-        if membarrier::is_supported() {
-            STRATEGY.store(MEMBARRIER, Ordering::Relaxed);
-        } else if mprotect::is_supported() {
-            STRATEGY.store(MPROTECT, Ordering::Relaxed);
-        }
+        static DETECT: Once = Once::new();
+        DETECT.call_once(|| {
+            if membarrier::is_supported() {
+                STRATEGY.store(MEMBARRIER, Ordering::Relaxed);
+            } else if mprotect::is_supported() {
+                STRATEGY.store(MPROTECT, Ordering::Relaxed);
+            }
+        });
     }
 
     macro_rules! fatal_assert {
@@ -151,6 +170,9 @@ mod linux {
     }
 
     mod membarrier {
+        use super::{mprotect, Ordering, MPROTECT, STRATEGY};
+        use std::sync::Once;
+
         /// Commands for the membarrier system call.
         ///
         /// # Caveat
@@ -180,25 +202,37 @@ mod linux {
             unsafe { libc::syscall(libc::SYS_membarrier, cmd as libc::c_int, 0 as libc::c_int) }
         }
 
-        /// Returns `true` if the `sys_membarrier` call is available.
+        /// Returns `true` if the kernel supports private expedited membarrier.
         pub fn is_supported() -> bool {
             // Queries which membarrier commands are supported. Checks if private expedited
             // membarrier is supported.
             let ret = sys_membarrier(membarrier_cmd::MEMBARRIER_CMD_QUERY);
-            if ret < 0
-                || ret & membarrier_cmd::MEMBARRIER_CMD_PRIVATE_EXPEDITED as libc::c_long == 0
-                || ret & membarrier_cmd::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED as libc::c_long
-                    == 0
-            {
-                return false;
-            }
+            ret >= 0
+                && ret & membarrier_cmd::MEMBARRIER_CMD_PRIVATE_EXPEDITED as libc::c_long != 0
+                && ret & membarrier_cmd::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED as libc::c_long
+                    != 0
+        }
 
-            // Registers the current process as a user of private expedited membarrier.
-            if sys_membarrier(membarrier_cmd::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) < 0 {
-                return false;
-            }
-
-            true
+        /// Registers the process for private expedited membarrier, once, before
+        /// its first barrier; concurrent first callers wait for it.
+        ///
+        /// Light stores issued before registration need no extra ordering: the
+        /// registration of a multi-threaded process ends with an RCU grace
+        /// period, during which every CPU executes a full memory barrier, and a
+        /// single-threaded process has no other thread to order against.
+        ///
+        /// If the kernel refuses registration, the strategy falls back to the
+        /// `mprotect` barrier, which also orders the relaxed light stores issued
+        /// so far. Without it there is no barrier that does, so we abort, as a
+        /// failed barrier does.
+        pub fn register() {
+            static REGISTER: Once = Once::new();
+            REGISTER.call_once(|| {
+                if sys_membarrier(membarrier_cmd::MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) < 0 {
+                    fatal_assert!(mprotect::is_supported());
+                    STRATEGY.store(MPROTECT, Ordering::Relaxed);
+                }
+            });
         }
 
         /// Executes a heavy `sys_membarrier`-based barrier.
